@@ -174,6 +174,47 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
   const [isLocking, setIsLocking] = useState(false)
   const [settlementDateRange, setSettlementDateRange] = useState({ start: "", end: "" })
 
+  // 당일 정산: 일당 수정(draft) + 저장 상태
+  const [dailyWageDraftByWorkerId, setDailyWageDraftByWorkerId] = useState<Record<string, number>>({})
+  const [dailyWageSavedByWorkerId, setDailyWageSavedByWorkerId] = useState<Record<string, number>>({})
+  const [savingRowId, setSavingRowId] = useState<string | null>(null)
+
+  const getDailyWage = (workerId: string) => {
+    // 우선순위: draft > saved > default(200000)
+    return (
+      dailyWageDraftByWorkerId[workerId] ??
+      dailyWageSavedByWorkerId[workerId] ??
+      200000
+    )
+  }
+
+  const handleSaveDailyWageRow = async (workerId: string) => {
+    const wage = getDailyWage(workerId)
+
+    try {
+      setSavingRowId(workerId)
+
+      // TODO(Supabase): DB 연결 후 여기만 교체하면 됨
+      // await supabase.from("daily_settlements").upsert({ site_id, worker_id, date, wage })
+
+      // 저장값 확정
+      setDailyWageSavedByWorkerId((prev) => ({ ...prev, [workerId]: wage }))
+
+      // draft 제거
+      setDailyWageDraftByWorkerId((prev) => {
+        const next = { ...prev }
+        delete next[workerId]
+        return next
+      })
+
+      toast.success("일당이 저장되었습니다")
+    } catch (e) {
+      toast.error("저장에 실패했습니다")
+    } finally {
+      setSavingRowId(null)
+    }
+  }
+
 
 
   // Get global pool (workers with status "출근" and not assigned)
@@ -202,6 +243,10 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     () => state.workers.filter((w) => fixedAssignedIds.includes(w.id)),
     [state.workers, fixedAssignedIds]
   )
+
+  const todayWorkers = [...dailyAssignedWorkers, ...fixedAssignedWorkers]
+  const uniqueWorkers = Array.from(new Map(todayWorkers.map(w => [w.id, w])).values())
+  const totalDailyWage = uniqueWorkers.reduce((sum, w) => sum + getDailyWage(w.id), 0)
 
 
 
@@ -1030,6 +1075,8 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
           </div>
         </TabsContent>
 
+        
+
         {/* 당일 정산 Tab Content - Today's wages */}
         <TabsContent value="당일정산" className="flex-1 m-0 overflow-hidden">
           <div className="flex h-full flex-col">
@@ -1066,6 +1113,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                       <TableHead className="min-w-[80px]">역할</TableHead>
                       <TableHead className="min-w-[80px]">배치 유형</TableHead>
                       <TableHead className="min-w-[100px] text-right">일당</TableHead>
+                      <TableHead className="w-[90px] text-right">저장</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1080,8 +1128,29 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                             {dailyAssignedWorkers.some(w => w.id === worker.id) ? "당일" : "고정"}
                           </Badge>
                         </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {formatKoreanMoney(200000)}
+                        <TableCell className="text-right">
+                          <Input
+                            type="number"
+                            inputMode="numeric"
+                            className="h-8 w-[120px] text-right"
+                            value={getDailyWage(worker.id)}
+                            onChange={(e) => {
+                              const next = Number(e.target.value || 0)
+                              setDailyWageDraftByWorkerId((prev) => ({ ...prev, [worker.id]: next }))
+                            }}
+                          />
+                        </TableCell>
+
+                        <TableCell className="text-right">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-8 bg-transparent"
+                            disabled={savingRowId === worker.id}
+                            onClick={() => handleSaveDailyWageRow(worker.id)}
+                          >
+                            {savingRowId === worker.id ? "저장중" : "저장"}
+                          </Button>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -1096,7 +1165,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                     총 {dailyAssignedWorkers.length + fixedAssignedWorkers.length}명
                   </span>
                   <span className="text-sm font-semibold">
-                    합계: {formatKoreanMoney((dailyAssignedWorkers.length + fixedAssignedWorkers.length) * 200000)}
+                    합계: {formatKoreanMoney(totalDailyWage)}
                   </span>
                 </div>
               </div>
