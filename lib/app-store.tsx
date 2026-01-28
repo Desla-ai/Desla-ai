@@ -246,32 +246,43 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
           return
         }
 
-        // DB 모드: 기본 뼈대는 유지하고 sites/workers만 서버에서 주입
-        const [sitesRes, workersRes, rolesRes] = await Promise.all([
+        // DB 모드: sites/workers는 필수, roles는 선택(실패해도 앱 유지)
+        const [sitesRes, workersRes] = await Promise.all([
           fetch("/api/sites", { method: "GET" }),
           fetch("/api/workers", { method: "GET" }),
-          fetch("/api/roles", { method: "GET" }),
         ])
 
-        if (!sitesRes.ok || !workersRes.ok || !rolesRes.ok) throw new Error("DB fetch failed")
+        if (!sitesRes.ok || !workersRes.ok) {
+          throw new Error(`DB fetch failed (sites=${sitesRes.status}, workers=${workersRes.status})`)
+        }
 
         const sitesJson = await sitesRes.json()
         const workersJson = await workersRes.json()
-        const rolesJson = await rolesRes.json()
+
+        // roles는 실패해도 prev.roles 유지
+        let rolesJson: any = null
+        try {
+          const rolesRes = await fetch("/api/roles", { method: "GET" })
+          if (rolesRes.ok) rolesJson = await rolesRes.json()
+          else console.warn("roles fetch failed:", rolesRes.status)
+        } catch (e) {
+          console.warn("roles fetch error:", e)
+        }
 
         setState((prev) => ({
           ...prev,
           sites: sitesJson.sites ?? [],
           workers: workersJson.workers ?? [],
-          roles: rolesJson.roles ?? [], // ✅ 이 한 줄 때문에 UI 역할이 살아남
-          // assignments는 다음 단계에서 DB로 옮김 (지금은 prev 유지)
+          roles: rolesJson?.roles ?? prev.roles,
         }))
-      } catch {
-        // 실패하면 기존 mock으로라도 화면이 뜨게 유지
+      } catch (e) {
+        console.error("hydrate failed:", e)
+        // 실패하면 기존 mock으로라도 화면이 뜨게 유지(기존 정책 유지)
       } finally {
         setIsHydrated(true)
       }
     }
+
 
     hydrate()
   }, [])
