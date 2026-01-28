@@ -271,7 +271,7 @@ export default function SettlementPage() {
               {/* 2) 컨텐츠 영역 */}
               <div className="flex-1 min-h-0 overflow-hidden">
                 <TabsContent value="config" className="h-full m-0 data-[state=inactive]:hidden">
-                  <SettlementConfigTab siteId={selectedSiteId} siteName={selectedSite?.name || ""} />
+                  <SettlementConfigTab siteId={selectedSiteId} siteName={selectedSite?.name || ""} period={selectedPeriod} />
                 </TabsContent>
 
                 <TabsContent value="workforce" className="h-full m-0 data-[state=inactive]:hidden">
@@ -320,9 +320,11 @@ export default function SettlementPage() {
 function SettlementConfigTab({
   siteId,
   siteName,
+  period,
 }: {
   siteId: string | null
   siteName: string
+  period: string
 }) {
   const [loading, setLoading] = useState(false)
   const [rules, setRules] = useState<SettlementRule[]>([])
@@ -333,67 +335,68 @@ function SettlementConfigTab({
   useEffect(() => {
     if (!siteId) return
     loadRules()
-  }, [siteId])
+  }, [siteId, period])
 
   const loadRules = async () => {
+    if (!siteId) return
     setLoading(true)
     try {
-      await new Promise((r) => setTimeout(r, 500))
-      setRules([
-        {
-          id: "rule-1",
-          siteId: siteId!,
-          type: "site",
-          commissionType: "RATE",
-          commissionValue: 10,
-          effectiveStart: "2025-01",
-          effectiveEnd: "2025-12",
-        },
-        {
-          id: "rule-2",
-          siteId: siteId!,
-          type: "occupation",
-          targetId: "r1",
-          targetName: "형틀",
-          commissionType: "RATE",
-          commissionValue: 8,
-          effectiveStart: "2025-01",
-          effectiveEnd: "2025-12",
-        },
-        {
-          id: "rule-3",
-          siteId: siteId!,
-          type: "worker",
-          targetId: "w1",
-          targetName: "김철수",
-          commissionType: "FIXED",
-          commissionValue: 15000,
-          effectiveStart: "2025-01",
-          effectiveEnd: "2025-06",
-        },
-      ])
+      const res = await fetch(
+        `/api/settlement-rules?siteId=${encodeURIComponent(siteId)}&period=${encodeURIComponent(period)}`
+      )
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "규칙 로드 실패")
+
+      setRules(json.rules ?? [])
+    } catch (e: any) {
+      toast.error(e?.message ?? "규칙을 불러오지 못했습니다")
+      setRules([])
     } finally {
       setLoading(false)
     }
   }
 
+
   const handleSaveRule = async (rule: SettlementRule) => {
-    await new Promise((r) => setTimeout(r, 300))
-    if (rule.id.startsWith("new-")) {
-      rule.id = `rule-${Date.now()}`
-      setRules((prev) => [...prev, rule])
-    } else {
-      setRules((prev) => prev.map((r) => (r.id === rule.id ? rule : r)))
+    try {
+      const res = await fetch("/api/settlement-rules", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(rule),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "규칙 저장 실패")
+
+      const saved = (json.rule ?? json) as SettlementRule
+
+      setRules((prev) => {
+        const exists = prev.some((r) => r.id === saved.id)
+        return exists ? prev.map((r) => (r.id === saved.id ? saved : r)) : [...prev, saved]
+      })
+
+      setEditDialogOpen(false)
+      toast.success("규칙이 저장되었습니다")
+    } catch (e: any) {
+      toast.error(e?.message ?? "규칙 저장 실패")
     }
-    setEditDialogOpen(false)
-    toast.success("규칙이 저장되었습니다")
   }
 
+
   const handleDeleteRule = async (ruleId: string) => {
-    await new Promise((r) => setTimeout(r, 300))
-    setRules((prev) => prev.filter((r) => r.id !== ruleId))
-    toast.success("규칙이 삭제되었습니다")
+    try {
+      const res = await fetch(`/api/settlement-rules?id=${encodeURIComponent(ruleId)}`, {
+        method: "DELETE",
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "규칙 삭제 실패")
+
+      setRules((prev) => prev.filter((r) => r.id !== ruleId))
+      toast.success("규칙이 삭제되었습니다")
+    } catch (e: any) {
+      toast.error(e?.message ?? "규칙 삭제 실패")
+    }
   }
+
 
   if (!siteId) {
     return (
@@ -693,7 +696,11 @@ function RuleEditForm({
           <Input
             value={formData.targetName || ""}
             onChange={(e) =>
-              setFormData({ ...formData, targetName: e.target.value })
+              setFormData({
+                ...formData,
+                targetName: e.target.value,
+                targetId: e.target.value, // ✅ MVP: targetId를 targetName과 동일하게
+              })
             }
             placeholder={rule.type === "occupation" ? "예: 형틀" : "예: 김철수"}
           />
@@ -806,118 +813,40 @@ function WorkforceSettlementTab({
     loadSettlements()
   }, [siteId, period])
 
+  function getMonthRange(periodYm: string) {
+    // periodYm: "YYYY-MM"
+    const [yStr, mStr] = periodYm.split("-")
+    const y = Number(yStr)
+    const m = Number(mStr)
+    // 말일 계산: 다음달 0일
+    const endDate = new Date(y, m, 0)
+    const end = `${yStr}-${mStr}-${String(endDate.getDate()).padStart(2, "0")}`
+    const start = `${yStr}-${mStr}-01`
+    return { start, end }
+  }
+
+
   const loadSettlements = async () => {
+    if (!siteId) return
     setLoading(true)
     try {
-      // API stub: GET /api/settlements?siteId=&period=
-      await new Promise((r) => setTimeout(r, 600))
-      // Mock data with different modes
-      setSettlements([
-        {
-          id: "st-1",
-          type: "worker",
-          workerId: "w1",
-          name: "김철수",
-          occupation: "형틀",
-          attendanceDays: 15,
-          attendanceHours: 120,
-          mode: "PROXY",
-          introFee: 0,
-          dailyWage: 200000,
-          commission: 300000,
-          commissionRule: "인력별 고정 15,000원",
-          advance: 0,
-          netPay: 2700000,
-          foremanPayoutTotal: 0,
-          memberCount: 0,
-          memberIds: [],
-          status: "SETTLED",
-        },
-        {
-          id: "st-2",
-          type: "worker",
-          workerId: "w2",
-          name: "이영희",
-          occupation: "콘크리트",
-          attendanceDays: 12,
-          attendanceHours: 96,
-          mode: "DIRECT",
-          introFee: 50000,
-          dailyWage: 180000,
-          commission: 0,
-          commissionRule: "",
-          advance: 0,
-          netPay: 0,
-          foremanPayoutTotal: 0,
-          memberCount: 0,
-          memberIds: [],
-          status: "READY",
-        },
-        {
-          id: "st-3",
-          type: "worker",
-          workerId: "w5",
-          name: "최준혁",
-          occupation: "철근",
-          attendanceDays: 18,
-          attendanceHours: 144,
-          mode: "PROXY",
-          introFee: 0,
-          dailyWage: 190000,
-          commission: 342000,
-          commissionRule: "현장 기본 10%",
-          advance: 100000,
-          netPay: 2978000,
-          foremanPayoutTotal: 0,
-          memberCount: 0,
-          memberIds: [],
-          status: "UNSETTLED",
-        },
-        {
-          id: "st-4",
-          type: "team",
-          teamId: "team-1",
-          name: "박반장 팀",
-          occupation: "형틀",
-          attendanceDays: 20,
-          attendanceHours: 160,
-          mode: "TEAM",
-          introFee: 0,
-          dailyWage: 0,
-          commission: 0,
-          commissionRule: "",
-          advance: 0,
-          netPay: 0,
-          foremanPayoutTotal: 5000000,
-          memberCount: 4,
-          memberIds: ["w10", "w11", "w12", "w13"],
-          status: "UNSETTLED",
-        },
-        {
-          id: "st-5",
-          type: "worker",
-          workerId: "w6",
-          name: "강민지",
-          occupation: "비계",
-          attendanceDays: 10,
-          attendanceHours: 80,
-          mode: "PROXY",
-          introFee: 0,
-          dailyWage: 170000,
-          commission: 136000,
-          commissionRule: "직종별 8%",
-          advance: 50000,
-          netPay: 1514000,
-          foremanPayoutTotal: 0,
-          memberCount: 0,
-          memberIds: [],
-          status: "READY",
-        },
-      ])
+      const { start, end } = getMonthRange(period)
+
+      const res = await fetch(
+        `/api/settlements/workforce?siteId=${encodeURIComponent(siteId)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
+      )
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "정산 로드 실패")
+
+      setSettlements(json.settlements ?? [])
+    } catch (e: any) {
+      toast.error(e?.message ?? "정산 데이터를 불러오지 못했습니다")
+      setSettlements([])
     } finally {
       setLoading(false)
     }
   }
+
 
   // Filtered settlements
   const filteredSettlements = useMemo(() => {
@@ -1091,14 +1020,26 @@ function WorkforceSettlementTab({
 
   // Complete scope
   const handleCompleteScope = async () => {
+    if (!siteId) return
+    const { start, end } = getMonthRange(period)
+
     setIsCompletingScope(true)
     try {
-      // API stub: POST /api/settlements/scope/complete
-      await new Promise((r) => setTimeout(r, 500))
-      toast.success("해당 범위 전체 정산 완료")
+      const res = await fetch("/api/settlements/lock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ siteId, start, end }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "정산 락 실패")
+
+      toast.success("해당 범위 정산 확정(락) 완료")
       setCompleteScopeDialogOpen(false)
-    } catch {
-      toast.error("정산 완료 처리에 실패했습니다")
+
+      // 락 후 다시 로드 -> anyLocked 반영되어 status가 SETTLED로 내려옴
+      await loadSettlements()
+    } catch (e: any) {
+      toast.error(e?.message ?? "정산 완료 처리에 실패했습니다")
     } finally {
       setIsCompletingScope(false)
     }
@@ -1437,12 +1378,6 @@ function WorkforceSettlementTab({
                 {saving ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
                 저장
               </Button>
-              {editedTarget?.status !== "SETTLED" && (
-                <Button onClick={handleMarkSettled} disabled={saving}>
-                  <Check className="mr-1.5 h-4 w-4" />
-                  정산 완료
-                </Button>
-              )}
             </div>
           </div>
         </SheetContent>
@@ -1819,69 +1754,30 @@ function PayoutManagementTab({
   }, [siteId, period])
 
   const loadData = async () => {
+    if (!siteId) return
     setLoading(true)
     try {
-      await new Promise((r) => setTimeout(r, 600))
-      setPayables([
-        {
-          id: "pay-1",
-          siteId: siteId!,
-          siteName,
-          period,
-          payeeType: "WORKER",
-          payeeId: "w1",
-          payeeName: "김철수",
-          amount: 2700000,
-          status: "ACCUMULATED",
-          createdAt: "2025-01-15",
-        },
-        {
-          id: "pay-2",
-          siteId: siteId!,
-          siteName,
-          period,
-          payeeType: "WORKER",
-          payeeId: "w5",
-          payeeName: "최준혁",
-          amount: 2978000,
-          status: "ACCUMULATED",
-          createdAt: "2025-01-15",
-        },
-        {
-          id: "pay-3",
-          siteId: siteId!,
-          siteName,
-          period,
-          payeeType: "FOREMAN",
-          payeeId: "team-1",
-          payeeName: "박반장 팀",
-          amount: 5000000,
-          status: "ACCUMULATED",
-          createdAt: "2025-01-15",
-        },
-      ])
-      setHistory([
-        {
-          id: "hist-1",
-          paidAt: "2025-01-10",
-          paidByUserId: "u1",
-          paidByUserName: "관리자",
-          siteId: siteId!,
-          siteName,
-          period: "2025-01",
-          items: [
-            { payableItemId: "pay-old-1", payeeType: "WORKER", payeeName: "이영희", amount: 1844000 },
-            { payableItemId: "pay-old-2", payeeType: "WORKER", payeeName: "강민지", amount: 1514000 },
-          ],
-          totalAmount: 3358000,
-          memo: "1월 중간정산",
-          method: "계좌이체",
-        },
-      ])
+      const res = await fetch(
+        `/api/payouts?siteId=${encodeURIComponent(siteId)}&period=${encodeURIComponent(period)}`
+      )
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "지급 데이터 로드 실패")
+
+      // 서버가 siteName을 비워서 줄 수도 있으니 여기서 채워도 됨
+      const payables = (json.payables ?? []).map((p: PayableItem) => ({ ...p, siteName }))
+      const history = (json.history ?? []).map((h: any) => ({ ...h, siteName }))
+
+      setPayables(payables)
+      setHistory(history)
+    } catch (e: any) {
+      toast.error(e?.message ?? "지급 데이터를 불러오지 못했습니다")
+      setPayables([])
+      setHistory([])
     } finally {
       setLoading(false)
     }
   }
+
 
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
@@ -1906,22 +1802,31 @@ function PayoutManagementTab({
   const handlePayout = async () => {
     setIsPaying(true)
     try {
-      await new Promise((r) => setTimeout(r, 500))
-      setPayables((prev) =>
-        prev.map((p) =>
-          selectedPayableIds.includes(p.id) ? { ...p, status: "PAID" as const } : p
-        )
-      )
+      const res = await fetch("/api/payouts/mark-paid", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          siteId,
+          payableItemIds: selectedPayableIds,
+          memo: payoutMemo,
+          method: "계좌이체",
+        }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "지급 처리 실패")
+
+      toast.success("지급 완료 처리되었습니다")
       setSelectedPayableIds([])
       setPayoutDialogOpen(false)
       setPayoutMemo("")
-      toast.success("지급 완료 처리되었습니다")
-    } catch {
-      toast.error("지급 처리에 실패했습니다")
+      await loadData()
+    } catch (e: any) {
+      toast.error(e?.message ?? "지급 처리에 실패했습니다")
     } finally {
       setIsPaying(false)
     }
   }
+
 
   if (!siteId) {
     return (

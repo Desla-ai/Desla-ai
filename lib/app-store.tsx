@@ -84,15 +84,6 @@ export interface WorkerSettlementOverride {
   }[]
 }
 
-// Assignment mapping
-export interface SiteAssignment {
-  siteId: string
-  waitingWorkerIds: string[]
-  assignedWorkerIds: string[]
-  fixedWorkerIds: string[]
-  todayRequired: number
-}
-
 // Full app state
 export interface AppState {
   sites: Site[]
@@ -103,7 +94,6 @@ export interface AppState {
   roles: Role[]
   smsTemplates: SmsTemplate[]
   lastUsedTemplateId: string | null
-  assignments: SiteAssignment[]
   settlementConfig: {
     mode: "직불" | "대불" | "팀"
     baseDailyWage: number
@@ -147,27 +137,6 @@ const USE_DB = true; // DB 적용 단계에서는 true
 
 // Initial state builder
 function buildInitialState(): AppState {
-  const assignments: SiteAssignment[] = mockSites.map((site) => {
-    const siteWorkers = mockWorkers.filter((w) => w.assignedSiteId === site.id)
-    const fixed = siteWorkers.filter((w) => w.isFixed).map((w) => w.id)
-    const assigned = siteWorkers.filter((w) => !w.isFixed).map((w) => w.id)
-    return {
-      siteId: site.id,
-      waitingWorkerIds: [],
-      assignedWorkerIds: assigned,
-      fixedWorkerIds: fixed,
-      todayRequired: site.todayRequired,
-    }
-  })
-
-  // Workers not assigned to any site go to a global waiting pool
-  const assignedWorkerIds = new Set(mockWorkers.filter((w) => w.assignedSiteId).map((w) => w.id))
-  const waitingWorkerIds = mockWorkers.filter((w) => !assignedWorkerIds.has(w.id)).map((w) => w.id)
-
-  // Add waiting workers to first site's waiting pool for demo
-  if (assignments.length > 0) {
-    assignments[0].waitingWorkerIds = waitingWorkerIds
-  }
 
   return {
     sites: mockSites,
@@ -178,7 +147,6 @@ function buildInitialState(): AppState {
     roles: defaultRoles,
     smsTemplates: defaultSmsTemplates,
     lastUsedTemplateId: null,
-    assignments,
     settlementConfig: {
       mode: "직불",
       baseDailyWage: 200000,
@@ -201,11 +169,6 @@ interface AppStoreContextType {
   addWorker: (worker: Omit<Worker, "id">) => Promise<void>
   updateWorker: (worker: Worker) => Promise<void>
   deleteWorker: (workerId: string) => Promise<void>
-  // Assignments
-  updateAssignment: (assignment: SiteAssignment) => void
-  moveWorkerToWaiting: (workerId: string, siteId: string) => void
-  moveWorkerToAssigned: (workerId: string, siteId: string) => void
-  moveWorkerToFixed: (workerId: string, siteId: string) => void
   // Settlement
   updateSettlementConfig: (config: Partial<AppState["settlementConfig"]>) => void
   addSettlementRecord: (record: Omit<SettlementRecord, "id">) => void
@@ -224,6 +187,8 @@ interface AppStoreContextType {
   loadSnapshot: (snapshot: AppSnapshot) => Promise<void>
   getSnapshots: () => Promise<AppSnapshot[]>
   deleteSnapshot: (snapshotId: string) => Promise<void>
+  // Role
+  addRole: (role: { name: string; color: string }) => Promise<any>
 }
 
 const AppStoreContext = createContext<AppStoreContextType | undefined>(undefined)
@@ -307,16 +272,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setState((prev) => ({
       ...prev,
       sites: [site, ...prev.sites],
-      assignments: [
-        {
-          siteId: site.id,
-          waitingWorkerIds: [],
-          assignedWorkerIds: [],
-          fixedWorkerIds: [],
-          todayRequired: site.todayRequired ?? 0,
-        },
-        ...prev.assignments,
-      ],
     }));
   }, []);
 
@@ -350,9 +305,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setState((prev) => ({
       ...prev,
       sites: prev.sites.map((s) => (s.id === updated.id ? updated : s)),
-      assignments: prev.assignments.map((a) =>
-        a.siteId === updated.id ? { ...a, todayRequired: updated.todayRequired ?? 0 } : a
-      ),
     }));
   }, []);
 
@@ -364,7 +316,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setState((prev) => ({
       ...prev,
       sites: prev.sites.filter((s) => s.id !== siteId),
-      assignments: prev.assignments.filter((a) => a.siteId !== siteId),
     }));
   }, []);
 
@@ -395,6 +346,15 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         status: (worker as any).status ?? "미출근",
         is_fixed: (worker as any).isFixed ?? (worker as any).is_fixed ?? false,
         assigned_site_id: (worker as any).assignedSiteId ?? (worker as any).assigned_site_id ?? null,
+        fixed_start_date:
+          (worker as any).fixedStartDate ??
+          (worker as any).fixed_start_date ??
+          null,
+
+        fixed_end_date:
+          (worker as any).fixedEndDate ??
+          (worker as any).fixed_end_date ??
+          null,
 
         // ✅ 역할 저장(서버 PATCH가 role_ids 처리 이미 하고 있음)
         role_ids: (worker.roles ?? []).map((r: any) => r.id),
@@ -419,93 +379,31 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setState((prev) => ({
       ...prev,
       workers: prev.workers.filter((w) => w.id !== workerId),
-      assignments: prev.assignments.map((a) => ({
-        ...a,
-        waitingWorkerIds: a.waitingWorkerIds.filter((id) => id !== workerId),
-        assignedWorkerIds: a.assignedWorkerIds.filter((id) => id !== workerId),
-        fixedWorkerIds: a.fixedWorkerIds.filter((id) => id !== workerId),
-      })),
     }));
   }, []);
 
-  // Assignments
-  const updateAssignment = useCallback((assignment: SiteAssignment) => {
-    setState((prev) => ({
-      ...prev,
-      assignments: prev.assignments.map((a) =>
-        a.siteId === assignment.siteId ? assignment : a
-      ),
-    }))
-  }, [])
+  const addRole = useCallback(async (payload: { name: string; color: string }) => {
+    const res = await fetch("/api/roles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
 
-  const moveWorkerToWaiting = useCallback((workerId: string, siteId: string) => {
-    setState((prev) => ({
-      ...prev,
-      workers: prev.workers.map((w) =>
-        w.id === workerId ? { ...w, status: "출근" as const, assignedSiteId: undefined, isFixed: false } : w
-      ),
-      assignments: prev.assignments.map((a) => {
-        if (a.siteId === siteId) {
-          return {
-            ...a,
-            waitingWorkerIds: [...a.waitingWorkerIds.filter((id) => id !== workerId), workerId],
-            assignedWorkerIds: a.assignedWorkerIds.filter((id) => id !== workerId),
-            fixedWorkerIds: a.fixedWorkerIds.filter((id) => id !== workerId),
-          }
-        }
-        return a
-      }),
-    }))
-  }, [])
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err?.error ?? "역할 생성 실패")
+    }
 
-  const moveWorkerToAssigned = useCallback((workerId: string, siteId: string) => {
-    setState((prev) => ({
-      ...prev,
-      workers: prev.workers.map((w) =>
-        w.id === workerId ? { ...w, status: "배치" as const, assignedSiteId: siteId, isFixed: false } : w
-      ),
-      assignments: prev.assignments.map((a) => {
-        if (a.siteId === siteId) {
-          return {
-            ...a,
-            waitingWorkerIds: a.waitingWorkerIds.filter((id) => id !== workerId),
-            assignedWorkerIds: [...a.assignedWorkerIds.filter((id) => id !== workerId), workerId],
-            fixedWorkerIds: a.fixedWorkerIds.filter((id) => id !== workerId),
-          }
-        }
-        return {
-          ...a,
-          waitingWorkerIds: a.waitingWorkerIds.filter((id) => id !== workerId),
-          assignedWorkerIds: a.assignedWorkerIds.filter((id) => id !== workerId),
-          fixedWorkerIds: a.fixedWorkerIds.filter((id) => id !== workerId),
-        }
-      }),
-    }))
-  }, [])
+    const json = await res.json()
+    const newRole = json.role ?? json
 
-  const moveWorkerToFixed = useCallback((workerId: string, siteId: string) => {
+    // 전역 roles 목록에 즉시 반영
     setState((prev) => ({
       ...prev,
-      workers: prev.workers.map((w) =>
-        w.id === workerId ? { ...w, status: "배치" as const, assignedSiteId: siteId, isFixed: true } : w
-      ),
-      assignments: prev.assignments.map((a) => {
-        if (a.siteId === siteId) {
-          return {
-            ...a,
-            waitingWorkerIds: a.waitingWorkerIds.filter((id) => id !== workerId),
-            assignedWorkerIds: a.assignedWorkerIds.filter((id) => id !== workerId),
-            fixedWorkerIds: [...a.fixedWorkerIds.filter((id) => id !== workerId), workerId],
-          }
-        }
-        return {
-          ...a,
-          waitingWorkerIds: a.waitingWorkerIds.filter((id) => id !== workerId),
-          assignedWorkerIds: a.assignedWorkerIds.filter((id) => id !== workerId),
-          fixedWorkerIds: a.fixedWorkerIds.filter((id) => id !== workerId),
-        }
-      }),
+      roles: [...(prev.roles ?? []), newRole],
     }))
+
+    return newRole
   }, [])
 
   // Settlement
@@ -678,10 +576,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         addWorker,
         updateWorker,
         deleteWorker,
-        updateAssignment,
-        moveWorkerToWaiting,
-        moveWorkerToAssigned,
-        moveWorkerToFixed,
         updateSettlementConfig,
         addSettlementRecord,
         setWorkerSettlementOverride,
@@ -695,6 +589,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         loadSnapshot,
         getSnapshots,
         deleteSnapshot,
+        addRole,
       }}
     >
       {children}

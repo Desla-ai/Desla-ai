@@ -37,3 +37,41 @@ export async function GET() {
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 })
   }
 }
+
+export async function POST(req: Request) {
+  // 1) 세션 가져오기 (프로젝트 표준 패턴)
+  const cookieStore = await cookies()
+  const session = verifySessionCookie(cookieStore.get(SESSION_COOKIE_NAME)?.value)
+
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  // 2) body 파싱
+  const body = await req.json().catch(() => ({}))
+  const name = String(body?.name ?? "").trim()
+  const color = String(body?.color ?? "").trim()
+
+  if (!name) {
+    return NextResponse.json({ error: "name is required" }, { status: 400 })
+  }
+  if (!color) {
+    return NextResponse.json({ error: "color is required" }, { status: 400 })
+  }
+
+  // 3) roles 생성(또는 병합) - office_id는 session.officeId로 고정
+  const { data, error } = await supabaseAdmin
+    .from("roles")
+    .upsert(
+      [{ office_id: session.officeId, name, color }],
+      { onConflict: "office_id,name" }
+    )
+    .select("id, office_id, name, color, created_at")
+    .single()
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+
+  return NextResponse.json({ role: data })
+}

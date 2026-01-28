@@ -61,7 +61,7 @@ export function WorkerDetailSheet({
   onWorkerUpdate,
   onWorkerDelete,
 }: WorkerDetailSheetProps) {
-  const { state } = useAppStore()
+  const { state, addRole } = useAppStore()
   const [selectedRoles, setSelectedRoles] = useState<Role[]>([])
   const [isAddingRole, setIsAddingRole] = useState(false)
   const [newRoleName, setNewRoleName] = useState("")
@@ -136,14 +136,15 @@ export function WorkerDetailSheet({
     })
   }
 
-  const handleAddNewRole = () => {
+  const handleAddNewRole = async () => {
     if (!newRoleName.trim()) return
-    const newRole: Role = {
-      id: `custom-${Date.now()}`,
+
+    const createdRole = await addRole({
       name: newRoleName.trim(),
       color: newRoleColor,
-    }
-    setSelectedRoles((prev) => [...prev, newRole])
+    })
+
+    setSelectedRoles((prev) => [...prev, createdRole])
     setNewRoleName("")
     setIsAddingRole(false)
   }
@@ -207,7 +208,7 @@ export function WorkerDetailSheet({
     setTeamMembers(newMembers)
     const updatedWorker = { ...worker, teamMembers: newMembers }
     onWorkerUpdate(updatedWorker)
-    
+
     // Also update the member's teamLeaderId
     const member = allWorkers.find((w) => w.id === memberId)
     if (member) {
@@ -221,7 +222,7 @@ export function WorkerDetailSheet({
     setTeamMembers(newMembers)
     const updatedWorker = { ...worker, teamMembers: newMembers }
     onWorkerUpdate(updatedWorker)
-    
+
     // Also remove the member's teamLeaderId
     const member = allWorkers.find((w) => w.id === memberId)
     if (member) {
@@ -293,13 +294,12 @@ export function WorkerDetailSheet({
                 <div>
                   <span className="text-muted-foreground">상태</span>
                   <Badge
-                    className={`${
-                      worker.status === "배치"
+                    className={`${worker.status === "배치"
                         ? "bg-chart-2/20 text-chart-2"
                         : worker.status === "출근"
                           ? "bg-chart-1/20 text-chart-1"
                           : "bg-muted text-muted-foreground"
-                    }`}
+                      }`}
                   >
                     {worker.status}
                   </Badge>
@@ -424,7 +424,7 @@ export function WorkerDetailSheet({
                 <Users className="h-4 w-4" />
                 <h3 className="font-semibold">팀 구조</h3>
               </div>
-              
+
               {/* Team Management Actions */}
               <div className="flex gap-2">
                 {worker.team !== "반장" && (
@@ -512,7 +512,7 @@ export function WorkerDetailSheet({
                         </div>
                       ))
                     )}
-                    
+
                     {availableForTeam.length > 0 && (
                       <div className="mt-2 border-t border-border pt-2">
                         <Button

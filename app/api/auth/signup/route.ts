@@ -4,6 +4,8 @@ import bcrypt from "bcryptjs";
 import { supabaseAdmin } from "@/lib/server/supabase-admin";
 import { createSessionCookie, SESSION_COOKIE_NAME } from "@/lib/server/session";
 
+import { defaultRoles } from "@/lib/mock-data"
+
 function jsonError(message: string, status: number) {
     return NextResponse.json({ error: message }, { status });
 }
@@ -43,6 +45,19 @@ export async function POST(req: Request) {
 
             if (officeErr) throw officeErr;
             officeId = office.id;
+
+            const { error: seedErr } = await supabaseAdmin
+                .from("roles")
+                .upsert(
+                    defaultRoles.map((r) => ({
+                        office_id: officeId,
+                        name: r.name,
+                        color: r.color,
+                    })),
+                    { onConflict: "office_id,name" }
+                )
+
+            if (seedErr) throw seedErr
         } else if (mode === "invite") {
             const inviteCode = String(body.inviteCode ?? "").trim();
             if (!inviteCode) return jsonError("inviteCode is required", 400);
@@ -62,6 +77,19 @@ export async function POST(req: Request) {
             }
 
             officeId = invite.office_id;
+
+            const { error: seedErr } = await supabaseAdmin
+                .from("roles")
+                .upsert(
+                    defaultRoles.map((r) => ({
+                        office_id: officeId,
+                        name: r.name,
+                        color: r.color,
+                    })),
+                    { onConflict: "office_id,name" }
+                )
+
+            if (seedErr) throw seedErr
 
             // 1-2) 1회용 처리 (레이스 완화: used_at IS NULL 조건)
             const nowIso = new Date().toISOString();

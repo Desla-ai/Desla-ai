@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Worker, Role, defaultRoles } from "@/lib/mock-data"
+import { useAppStore } from "@/lib/app-store"
 import { Plus, X, Check } from "lucide-react"
 
 interface RoleEditorModalProps {
@@ -29,8 +30,11 @@ const colorPalette = [
 ]
 
 export function RoleEditorModal({ worker, open, onOpenChange, onSave }: RoleEditorModalProps) {
+  const { addRole } = useAppStore()
+
   const [selectedRoles, setSelectedRoles] = useState<Role[]>(worker?.roles || [])
   const [isAddingNew, setIsAddingNew] = useState(false)
+  const [isCreatingRole, setIsCreatingRole] = useState(false)
   const [newRoleName, setNewRoleName] = useState("")
   const [newRoleColor, setNewRoleColor] = useState(colorPalette[0])
   const [customColor, setCustomColor] = useState("")
@@ -45,18 +49,25 @@ export function RoleEditorModal({ worker, open, onOpenChange, onSave }: RoleEdit
     })
   }
 
-  const handleAddNewRole = () => {
+  const handleAddNewRole = async () => {
     if (!newRoleName.trim()) return
-    const newRole: Role = {
-      id: `custom-${Date.now()}`,
-      name: newRoleName.trim(),
-      color: customColor || newRoleColor,
+    if (isCreatingRole) return
+    setIsCreatingRole(true)
+    try {
+      const createdRole = await addRole({
+        name: newRoleName.trim(),
+        color: (customColor || newRoleColor).trim(),
+      })
+      setSelectedRoles((prev) => [...prev, createdRole])
+      setNewRoleName("")
+      setIsAddingNew(false)
+      setCustomColor("")
+    } finally {
+      setIsCreatingRole(false)
     }
-    setSelectedRoles((prev) => [...prev, newRole])
-    setNewRoleName("")
-    setIsAddingNew(false)
-    setCustomColor("")
   }
+
+
 
   const handleSave = () => {
     if (worker) {
@@ -145,7 +156,7 @@ export function RoleEditorModal({ worker, open, onOpenChange, onSave }: RoleEdit
                       className="h-6 w-6 rounded-full ring-offset-2 transition-all hover:scale-110"
                       style={{
                         backgroundColor: color,
-                        ring: newRoleColor === color ? "2px solid currentColor" : undefined,
+                        boxShadow: newRoleColor === color ? "0 0 0 2px currentColor" : undefined,
                       }}
                       onClick={() => {
                         setNewRoleColor(color)

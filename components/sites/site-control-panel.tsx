@@ -100,9 +100,6 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     state,
     updateSite,
     updateWorker,
-    moveWorkerToWaiting,
-    moveWorkerToAssigned,
-    moveWorkerToFixed,
   } = useAppStore()
 
   const [activeTab, setActiveTab] = useState("배치")
@@ -179,6 +176,34 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
   const [dailyWageSavedByWorkerId, setDailyWageSavedByWorkerId] = useState<Record<string, number>>({})
   const [savingRowId, setSavingRowId] = useState<string | null>(null)
 
+  const getTodayLocalStr = () => {
+    const d = new Date()
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, "0")
+    const day = String(d.getDate()).padStart(2, "0")
+    return `${y}-${m}-${day}`
+  }
+
+  // 당일 정산 날짜: 기본은 오늘, 편집 모드에서만 변경
+  const [workDate, setWorkDate] = useState<string>(() => getTodayLocalStr())
+  const [isEditDateMode, setIsEditDateMode] = useState(false)
+  const [dailyRowsLoading, setDailyRowsLoading] = useState(false)
+
+  function isWithinLastNDays(dateStr: string, n: number) {
+    const [y, m, d] = dateStr.split("-").map(Number)
+    if (!y || !m || !d) return false
+
+    const target = new Date(y, m - 1, d) // ✅ local midnight
+    const now = new Date()
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()) // ✅ local midnight
+
+    const diffDays = Math.floor((today.getTime() - target.getTime()) / (1000 * 60 * 60 * 24))
+    return diffDays >= 0 && diffDays <= n
+  }
+
+
+
+
   const getDailyWage = (workerId: string) => {
     // 우선순위: draft > saved > default(200000)
     return (
@@ -194,10 +219,21 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     try {
       setSavingRowId(workerId)
 
-      // TODO(Supabase): DB 연결 후 여기만 교체하면 됨
-      // await supabase.from("daily_settlements").upsert({ site_id, worker_id, date, wage })
+      const res = await fetch("/api/daily-settlements", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          siteId: site?.id,
+          workerId,
+          workDate,     // ✅ 오늘 기본 + 편집 날짜
+          dailyWage: wage,
+        }),
+      })
 
-      // 저장값 확정
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "저장 실패")
+
+      // 저장값 확정(응답 row 기준으로 반영)
       setDailyWageSavedByWorkerId((prev) => ({ ...prev, [workerId]: wage }))
 
       // draft 제거
@@ -208,8 +244,8 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
       })
 
       toast.success("일당이 저장되었습니다")
-    } catch (e) {
-      toast.error("저장에 실패했습니다")
+    } catch (e: any) {
+      toast.error(e?.message ?? "저장에 실패했습니다")
     } finally {
       setSavingRowId(null)
     }
@@ -217,32 +253,35 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
 
 
 
+
   // Get global pool (workers with status "출근" and not assigned)
   const globalPoolWorkers = useMemo(() => {
-    const assignedWorkerIds = new Set<string>()
-    for (const a of state.assignments) {
-      for (const id of a.assignedWorkerIds) assignedWorkerIds.add(id)
-      for (const id of a.fixedWorkerIds) assignedWorkerIds.add(id)
-    }
-    // Include both 출근 workers (main pool) and optionally show 미출근 with different styling
-    return state.workers.filter(
-      (w) => (w.status === "출근" || w.status === "미출근") && !assignedWorkerIds.has(w.id)
-    )
-  }, [state.workers, state.assignments])
+    return state.workers.filter((w) => {
+      const assigned = (w as any).assignedSiteId ?? (w as any).assigned_site_id ?? null
+      return (w.status === "출근" || w.status === "미출근") && !assigned
+    })
+  }, [state.workers])
 
   // Get workers for this site
-  const assignment = state.assignments.find((a) => a.siteId === site?.id)
-  const dailyAssignedIds = assignment?.assignedWorkerIds || []
-  const fixedAssignedIds = assignment?.fixedWorkerIds || []
+  const siteId = site?.id
 
-  const dailyAssignedWorkers = useMemo(
-    () => state.workers.filter((w) => dailyAssignedIds.includes(w.id)),
-    [state.workers, dailyAssignedIds]
-  )
-  const fixedAssignedWorkers = useMemo(
-    () => state.workers.filter((w) => fixedAssignedIds.includes(w.id)),
-    [state.workers, fixedAssignedIds]
-  )
+  const dailyAssignedWorkers = useMemo(() => {
+    if (!siteId) return []
+    return state.workers.filter((w) => {
+      const assigned = (w as any).assignedSiteId ?? (w as any).assigned_site_id ?? null
+      const isFixed = (w as any).isFixed ?? (w as any).is_fixed ?? false
+      return assigned === siteId && !isFixed
+    })
+  }, [state.workers, siteId])
+
+  const fixedAssignedWorkers = useMemo(() => {
+    if (!siteId) return []
+    return state.workers.filter((w) => {
+      const assigned = (w as any).assignedSiteId ?? (w as any).assigned_site_id ?? null
+      const isFixed = (w as any).isFixed ?? (w as any).is_fixed ?? false
+      return assigned === siteId && isFixed
+    })
+  }, [state.workers, siteId])
 
   const todayWorkers = [...dailyAssignedWorkers, ...fixedAssignedWorkers]
   const uniqueWorkers = Array.from(new Map(todayWorkers.map(w => [w.id, w])).values())
@@ -268,6 +307,37 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
       setTodayRequiredInput(String(site.todayRequired))
     }
   }, [site])
+
+  useEffect(() => {
+    const loadDailyRows = async () => {
+      if (!site?.id) return
+      if (!isWithinLastNDays(workDate,30)) return
+
+      setDailyRowsLoading(true)
+      try {
+        const res = await fetch(`/api/daily-settlements?siteId=${site.id}&date=${workDate}`)
+        const json = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(json?.error ?? "당일 정산 로드 실패")
+
+        const rows = json.rows ?? []
+        const map: Record<string, number> = {}
+        for (const r of rows) {
+          map[r.worker_id] = r.daily_wage
+        }
+        setDailyWageSavedByWorkerId(map)
+        // draft는 날짜 바뀌면 초기화(편집 UX 안전)
+        setDailyWageDraftByWorkerId({})
+      } catch (e: any) {
+        toast.error(e?.message ?? "당일 정산을 불러오지 못했습니다")
+        setDailyWageSavedByWorkerId({})
+      } finally {
+        setDailyRowsLoading(false)
+      }
+    }
+
+    loadDailyRows()
+  }, [site?.id, workDate])
+
 
   const handleStatusChange = (newStatus: SiteStatusType) => {
     if (!site) return
@@ -346,22 +416,20 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     setDraggedWorker(null)
   }
 
-  const handleDropToDailyAssigned = () => {
+  const handleDropToDailyAssigned = async () => {
     if (!site || !draggedWorker) return
 
-    // Check if worker is "미출근" - cannot assign
     if (draggedWorker.status === "미출근") {
       toast.error("미출근 인력은 배치할 수 없습니다. 사무실 출근 처리 후 배치해 주세요.")
       setDraggedWorker(null)
       return
     }
 
-    // If from pool (출근 status)
     if (draggedWorker.status === "출근") {
-      moveWorkerToAssigned(draggedWorker.id, site.id)
-      updateWorker({ ...draggedWorker, status: "배치", assignedSiteId: site.id })
+      await updateWorker({ ...draggedWorker, status: "배치", assignedSiteId: site.id, isFixed: false } as any)
       toast.success(`${draggedWorker.name}님이 당일 배치되었습니다`)
     }
+
     setDraggedWorker(null)
   }
 
@@ -385,18 +453,22 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     setDraggedWorker(null)
   }
 
-  const handleDropToPool = () => {
+  const handleDropToPool = async () => {
     if (!site || !draggedWorker) return
-    // Can only release from daily assigned or fixed
-    if (dailyAssignedIds.includes(draggedWorker.id)) {
-      moveWorkerToWaiting(draggedWorker.id, site.id)
-      updateWorker({ ...draggedWorker, status: "출근", assignedSiteId: undefined })
+
+    const assigned = (draggedWorker as any).assignedSiteId ?? (draggedWorker as any).assigned_site_id ?? null
+    const isFixed = (draggedWorker as any).isFixed ?? (draggedWorker as any).is_fixed ?? false
+
+    // 이 현장의 "당일 배치"에서만 풀로 해제 허용(원래 의도 유지)
+    if (assigned === site.id && !isFixed) {
+      await updateWorker({ ...draggedWorker, status: "출근", assignedSiteId: undefined, isFixed: false } as any)
       toast.success(`${draggedWorker.name}님이 인력 풀로 이동되었습니다`)
     }
+
     setDraggedWorker(null)
   }
 
-  const handleConfirmFixedDateRange = () => {
+  const handleConfirmFixedDateRange = async () => {
     if (!site || fixedDateWorkerIds.length === 0) return
     if (!fixedStartDate || !fixedEndDate) {
       toast.error("시작일과 종료일을 모두 입력해주세요")
@@ -406,15 +478,14 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     for (const workerId of fixedDateWorkerIds) {
       const worker = state.workers.find((w) => w.id === workerId)
       if (worker) {
-        moveWorkerToFixed(workerId, site.id)
-        updateWorker({
+        await updateWorker({
           ...worker,
           isFixed: true,
           fixedStartDate,
           fixedEndDate,
           assignedSiteId: site.id,
           status: "배치",
-        })
+        } as any)
       }
     }
 
@@ -424,10 +495,10 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     setSelectedPoolWorkerIds([])
   }
 
-  const handleBulkMoveToDailyAssigned = () => {
+
+  const handleBulkMoveToDailyAssigned = async () => {
     if (!site || selectedPoolWorkerIds.length === 0) return
 
-    // Check if any selected worker is "미출근"
     const miChulgeunWorkers = selectedPoolWorkerIds.filter((id) => {
       const worker = state.workers.find((w) => w.id === id)
       return worker?.status === "미출근"
@@ -441,13 +512,14 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     for (const workerId of selectedPoolWorkerIds) {
       const worker = state.workers.find((w) => w.id === workerId)
       if (worker) {
-        moveWorkerToAssigned(workerId, site.id)
-        updateWorker({ ...worker, status: "배치", assignedSiteId: site.id })
+        await updateWorker({ ...worker, status: "배치", assignedSiteId: site.id, isFixed: false } as any)
       }
     }
+
     toast.success(`${selectedPoolWorkerIds.length}명이 당일 배치되었습니다`)
     setSelectedPoolWorkerIds([])
   }
+
 
   const handleBulkMoveToFixed = () => {
     if (!site || selectedPoolWorkerIds.length === 0) return
@@ -486,16 +558,13 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     setFixedEndDate(end.toISOString().split("T")[0])
   }
 
-  const handleNextDay = () => {
+  const handleNextDay = async () => {
     if (!site) return
-    // Reset daily assignments only - move them to pool with status "미출근"
-    for (const workerId of dailyAssignedIds) {
-      const worker = state.workers.find((w) => w.id === workerId)
-      if (worker) {
-        updateWorker({ ...worker, status: "미출근", assignedSiteId: undefined })
-      }
-      moveWorkerToWaiting(workerId, site.id)
+
+    for (const worker of dailyAssignedWorkers) {
+      await updateWorker({ ...worker, status: "미출근", assignedSiteId: undefined, isFixed: false } as any)
     }
+
     setShowNextDayDialog(false)
     toast.success("오늘 배치를 마감했습니다. 내일은 출근 처리 후 다시 배치해 주세요.")
   }
@@ -537,21 +606,22 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     toast.success("고정 배치 기간이 수정되었습니다")
   }
 
-  const handleRemoveFixed = () => {
+  const handleRemoveFixed = async () => {
     if (!editingFixedWorker || !site) return
-    updateWorker({
+    await updateWorker({
       ...editingFixedWorker,
       isFixed: false,
       fixedStartDate: undefined,
       fixedEndDate: undefined,
       status: "출근",
       assignedSiteId: undefined,
-    })
-    moveWorkerToWaiting(editingFixedWorker.id, site.id)
+    } as any)
+
     setEditFixedDialogOpen(false)
     setEditingFixedWorker(null)
     toast.success("고정 배치가 해제되었습니다")
   }
+
 
   // Get team info for selected worker
   const getTeamInfo = (worker: Worker) => {
@@ -576,38 +646,32 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     setSettlementError(null)
 
     try {
-      // API stub: GET /api/sites/:siteId/settlements/workforce
-      await new Promise((resolve) => setTimeout(resolve, 800))
+      const start = settlementDateRange?.start || site.startDate
+      const end = settlementDateRange?.end || new Date().toISOString().split("T")[0]
 
-      // Mock data based on assigned workers
-      const allAssignedWorkers = [...dailyAssignedWorkers, ...fixedAssignedWorkers]
-      const mockData = allAssignedWorkers.map((w, i) => ({
-        id: `settle-${w.id}`,
-        workerId: w.id,
-        workerName: w.name,
-        role: w.roles[0]?.name || "일반",
-        attendanceDays: Math.floor(Math.random() * 10) + 5,
-        attendanceHours: Math.floor(Math.random() * 80) + 40,
-        unitPrice: 200000,
-        calculatedAmount: (Math.floor(Math.random() * 10) + 5) * 200000,
-        adjustment: 0,
-        finalAmount: (Math.floor(Math.random() * 10) + 5) * 200000,
-        status: (i % 3 === 0 ? "정산완료" : "미정산") as "미정산" | "정산완료",
-      }))
+      const res = await fetch(
+        `/api/settlements/accumulated?siteId=${encodeURIComponent(site.id)}&start=${encodeURIComponent(
+          start
+        )}&end=${encodeURIComponent(end)}`
+      )
 
-      setSettlementData(mockData)
-      setSettlementDateRange({
-        start: site.startDate,
-        end: new Date().toISOString().split("T")[0],
-      })
-      // Check if locked
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body?.error || `누적 정산 조회 실패 (${res.status})`)
+      }
+
+      const body = await res.json()
+      setSettlementData(body.items ?? [])
+      setSettlementDateRange({ start, end })
       setSettlementLocked(site.status === "정산완료")
-    } catch {
-      setSettlementError("정산 데이터를 불러오는 데 실패했습니다.")
+    } catch (e: any) {
+      setSettlementError(e?.message ?? "누적 정산을 불러오지 못했습니다")
     } finally {
       setSettlementLoading(false)
     }
   }
+
+
 
   // Handle amount edit
   const handleStartEditAmount = (settlementId: string, currentAmount: number) => {
@@ -660,23 +724,37 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
 
     setIsLocking(true)
     try {
-      // API stub: POST /api/sites/:siteId/settlements/workforce/lock
-      await new Promise((resolve) => setTimeout(resolve, 500))
+      const start = settlementDateRange.start || site?.startDate
+      const end = settlementDateRange.end || new Date().toISOString().split("T")[0]
 
+      const res = await fetch("/api/settlements/lock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ siteId: site?.id, start, end }),
+      })
+
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "정산 확정에 실패했습니다.")
+
+      // 1) UI 잠금
       setSettlementLocked(true)
-      setSettlementData((prev) => prev.map((s) => ({ ...s, status: "정산완료" as const })))
-      if (site) {
-        updateSite({ ...site, status: "정산완료" })
-      }
+
+      // 2) 서버 기준으로 다시 로드(locked 반영된 상태로 rows.status가 바뀜)
+      await loadSettlementData()
+
+      // 3) site 상태도 정산완료로(이건 기존 UX 유지)
+      if (site) updateSite({ ...site, status: "정산완료" })
+
       toast.success("정산이 확정되었습니다.")
       setLockDialogOpen(false)
       setLockConfirmText("")
-    } catch {
-      toast.error("정산 확정에 실패했습니다.")
+    } catch (e: any) {
+      toast.error(e?.message ?? "정산 확정에 실패했습니다.")
     } finally {
       setIsLocking(false)
     }
   }
+
 
   // Load settlement when switching to that tab
   useEffect(() => {
@@ -1085,6 +1163,60 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
             <div className="shrink-0 flex items-center justify-between gap-4 border-b border-border bg-muted/30 px-4 py-3">
               <div className="flex items-center gap-3">
                 <h3 className="font-medium text-sm">오늘 출근 인력 급여</h3>
+                <div className="flex items-center gap-2">
+                  <Label className="text-xs text-muted-foreground">기준일</Label>
+                  {isEditDateMode ? (
+                    <>
+                      <Input
+                        type="date"
+                        value={workDate}
+                        onChange={(e) => {
+                          const next = e.target.value
+                          if (!isWithinLastNDays(next,30)) {
+                            toast.error("최근 30일 이내만 수정할 수 있습니다.")
+                            return
+                          }
+                          setWorkDate(next)
+                        }}
+                        className="h-8 w-32"
+                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 bg-transparent"
+                        onClick={() => {
+                          setIsEditDateMode(false)
+                          setWorkDate(getTodayLocalStr())
+                        }}
+
+                      >
+                        편집 종료
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-8"
+                        onClick={() => setWorkDate(getTodayLocalStr())}
+                      >
+                        오늘
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Badge variant="outline" className="h-8">
+                        {workDate}
+                      </Badge>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 bg-transparent"
+                        onClick={() => setIsEditDateMode(true)}
+                      >
+                        날짜 편집
+                      </Button>
+                    </>
+                  )}
+                </div>
                 <Badge variant="secondary">
                   {dailyAssignedWorkers.length + fixedAssignedWorkers.length}명
                 </Badge>
