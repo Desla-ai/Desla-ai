@@ -84,6 +84,8 @@ export function WorkerDetailSheet({
   const [isDissolving, setIsDissolving] = useState(false)
   const [teamDeleteError, setTeamDeleteError] = useState<string | null>(null)
 
+  const [teamId, setTeamId] = useState<string | null>(null)
+
   const availableForTeam = allWorkers.filter(
     (w) => w.id !== worker?.id && !teamMembers.includes(w.id) && w.team !== "반장"
   )
@@ -118,11 +120,29 @@ export function WorkerDetailSheet({
     : null
 
   useEffect(() => {
-    if (worker) {
-      setSelectedRoles(worker.roles || [])
-      setTeamMembers(worker.teamMembers || [])
+    if (!worker) return
+    if (worker.team !== "반장") {
+      setTeamId(null)
+      return
     }
-  }, [worker])
+
+    ; (async () => {
+      try {
+        const res = await fetch(`/api/teams?leaderWorkerId=${encodeURIComponent(worker.id)}`, { cache: "no-store" })
+        const json = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(json?.error ?? "팀 조회 실패")
+        const t = (json?.teams ?? [])[0]
+        setTeamId(t?.id ?? null)
+
+        // 멤버 목록도 DB 기준으로 UI 반영하려면 여기서 teamMembers를 세팅
+        const memberIds = (t?.members ?? []).map((m: any) => m.workerId)
+        setTeamMembers(memberIds)
+      } catch {
+        setTeamId(null)
+      }
+    })()
+  }, [worker?.id, worker?.team])
+
 
   if (!worker) return null
 
@@ -149,11 +169,29 @@ export function WorkerDetailSheet({
     setIsAddingRole(false)
   }
 
-  const handleSetAsLeader = () => {
-    const updatedWorker = { ...worker, team: "반장" as const, teamMembers: [], teamLeaderId: undefined }
-    onWorkerUpdate(updatedWorker)
-    toast.success(`${worker.name}님이 반장으로 설정되었습니다`)
+  const handleSetAsLeader = async () => {
+    try {
+      const res = await fetch("/api/teams", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leaderWorkerId: worker.id,
+          siteId: null, // 전체 인력 풀 팀: site_id는 null
+        }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "팀 생성 실패")
+
+      // UI 표시용: worker.team만 반장으로 표시 (레거시 필드에 의존하는 UI가 많아서)
+      const updatedWorker = { ...worker, team: "반장" as const }
+      onWorkerUpdate(updatedWorker)
+
+      toast.success(`${worker.name}님이 반장으로 설정되었습니다`)
+    } catch (e: any) {
+      toast.error(e?.message ?? "반장 설정 실패")
+    }
   }
+
 
   const handleRemoveFromTeam = () => {
     // If worker is a foreman, need to dissolve the team with confirmation
@@ -176,60 +214,90 @@ export function WorkerDetailSheet({
       setTeamDeleteError("'DELETE'를 정확히 입력해주세요.")
       return
     }
+    if (!teamId) {
+      setTeamDeleteError("팀 ID를 찾지 못했습니다. 다시 열어서 시도해주세요.")
+      return
+    }
 
     setIsDissolving(true)
     setTeamDeleteError(null)
 
     try {
-      // API stub: DELETE /api/teams/:teamId with body { reason: "foreman_removed" }
-      await new Promise((resolve) => setTimeout(resolve, 500))
+      const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "팀 해산 실패")
 
-      // Remove all team members from the team
-      const membersToUpdate = teamMemberWorkers || []
-      for (const member of membersToUpdate) {
+      // UI 호환: 멤버들/반장 레거시 표시 초기화
+      for (const member of teamMemberWorkers || []) {
         onWorkerUpdate({ ...member, team: null, teamLeaderId: undefined })
       }
-
-      // Remove foreman status from the worker
-      const updatedWorker = { ...worker, team: null, teamMembers: undefined }
-      onWorkerUpdate(updatedWorker)
+      onWorkerUpdate({ ...worker, team: null, teamMembers: undefined, teamLeaderId: undefined })
+      setTeamMembers([])
+      setTeamId(null)
 
       toast.success("팀이 해산되었습니다. 모든 팀원이 개별 인력으로 전환되었습니다.")
       setTeamDeleteDialogOpen(false)
-    } catch {
-      setTeamDeleteError("팀 해산 중 오류가 발생했습니다. 다시 시도해주세요.")
+    } catch (e: any) {
+      setTeamDeleteError(e?.message ?? "팀 해산 중 오류가 발생했습니다. 다시 시도해주세요.")
     } finally {
       setIsDissolving(false)
     }
   }
 
-  const handleAddTeamMember = (memberId: string) => {
-    const newMembers = [...teamMembers, memberId]
-    setTeamMembers(newMembers)
-    const updatedWorker = { ...worker, teamMembers: newMembers }
-    onWorkerUpdate(updatedWorker)
 
-    // Also update the member's teamLeaderId
-    const member = allWorkers.find((w) => w.id === memberId)
-    if (member) {
-      onWorkerUpdate({ ...member, team: "팀원", teamLeaderId: worker.id })
+  const handleAddTeamMember = async (memberId: string) => {
+    if (!teamId) {
+      toast.error("팀이 아직 생성되지 않았습니다. 먼저 반장 설정을 해주세요.")
+      return
     }
-    toast.success("팀원이 추가되었습니다")
+    try {
+      const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/members`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add", workerId: memberId }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "팀원 추가 실패")
+
+      // UI 반영(로컬)
+      const newMembers = [...teamMembers, memberId]
+      setTeamMembers(newMembers)
+      onWorkerUpdate({ ...worker, teamMembers: newMembers }) // UI 호환용(레거시)
+
+      const member = allWorkers.find((w) => w.id === memberId)
+      if (member) onWorkerUpdate({ ...member, team: "팀원", teamLeaderId: worker.id }) // UI 호환용
+
+      toast.success("팀원이 추가되었습니다")
+    } catch (e: any) {
+      toast.error(e?.message ?? "팀원 추가 실패")
+    }
   }
 
-  const handleRemoveTeamMember = (memberId: string) => {
-    const newMembers = teamMembers.filter((id) => id !== memberId)
-    setTeamMembers(newMembers)
-    const updatedWorker = { ...worker, teamMembers: newMembers }
-    onWorkerUpdate(updatedWorker)
 
-    // Also remove the member's teamLeaderId
-    const member = allWorkers.find((w) => w.id === memberId)
-    if (member) {
-      onWorkerUpdate({ ...member, team: null, teamLeaderId: undefined })
+  const handleRemoveTeamMember = async (memberId: string) => {
+    if (!teamId) return
+    try {
+      const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/members`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "remove", workerId: memberId }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "팀원 제거 실패")
+
+      const newMembers = teamMembers.filter((id) => id !== memberId)
+      setTeamMembers(newMembers)
+      onWorkerUpdate({ ...worker, teamMembers: newMembers }) // UI 호환용
+
+      const member = allWorkers.find((w) => w.id === memberId)
+      if (member) onWorkerUpdate({ ...member, team: null, teamLeaderId: undefined }) // UI 호환용
+
+      toast.success("팀원이 제거되었습니다")
+    } catch (e: any) {
+      toast.error(e?.message ?? "팀원 제거 실패")
     }
-    toast.success("팀원이 제거되었습니다")
   }
+
 
   const handleSaveRoles = () => {
     const updatedWorker = { ...worker, roles: selectedRoles }
@@ -295,10 +363,10 @@ export function WorkerDetailSheet({
                   <span className="text-muted-foreground">상태</span>
                   <Badge
                     className={`${worker.status === "배치"
-                        ? "bg-chart-2/20 text-chart-2"
-                        : worker.status === "출근"
-                          ? "bg-chart-1/20 text-chart-1"
-                          : "bg-muted text-muted-foreground"
+                      ? "bg-chart-2/20 text-chart-2"
+                      : worker.status === "출근"
+                        ? "bg-chart-1/20 text-chart-1"
+                        : "bg-muted text-muted-foreground"
                       }`}
                   >
                     {worker.status}

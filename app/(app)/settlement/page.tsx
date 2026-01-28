@@ -155,6 +155,19 @@ interface PayoutHistory {
   method: string
 }
 
+function getMonthRange(periodYm: string) {
+  // periodYm: "YYYY-MM"
+  const [yStr, mStr] = periodYm.split("-")
+  const y = Number(yStr)
+  const m = Number(mStr)
+
+  // 말일 계산: 다음달 0일
+  const endDate = new Date(y, m, 0)
+  const end = `${yStr}-${mStr}-${String(endDate.getDate()).padStart(2, "0")}`
+  const start = `${yStr}-${mStr}-01`
+  return { start, end }
+}
+
 export default function SettlementPage() {
   const { state } = useAppStore()
   const [activeTab, setActiveTab] = useState("workforce")
@@ -167,6 +180,8 @@ export default function SettlementPage() {
     () => state.sites.find((s) => s.id === selectedSiteId),
     [state.sites, selectedSiteId]
   )
+
+
 
   useEffect(() => {
     if (!selectedSiteId && state.sites.length > 0) {
@@ -682,6 +697,9 @@ function RuleEditForm({
   const [formData, setFormData] = useState(rule)
   const [saving, setSaving] = useState(false)
 
+  const { state } = useAppStore()
+  const workersForSelect = state.workers ?? []
+
   const handleSubmit = async () => {
     setSaving(true)
     await onSave(formData)
@@ -690,20 +708,52 @@ function RuleEditForm({
 
   return (
     <div className="space-y-4">
-      {(rule.type === "occupation" || rule.type === "worker") && (
+      {rule.type === "occupation" && (
         <div>
-          <Label>{rule.type === "occupation" ? "직종명" : "인력명"}</Label>
+          <Label>직종명</Label>
           <Input
             value={formData.targetName || ""}
             onChange={(e) =>
               setFormData({
                 ...formData,
                 targetName: e.target.value,
-                targetId: e.target.value, // ✅ MVP: targetId를 targetName과 동일하게
+                targetId: e.target.value, // 직종은 name을 id처럼 써도 pickRule이 targetName도 비교함
               })
             }
-            placeholder={rule.type === "occupation" ? "예: 형틀" : "예: 김철수"}
+            placeholder="예: 형틀"
           />
+        </div>
+      )}
+
+      {rule.type === "worker" && (
+        <div>
+          <Label>인력 선택</Label>
+          <Select
+            value={formData.targetId || ""}
+            onValueChange={(id) => {
+              const w = (workersForSelect as any[]).find((x) => x.id === id)
+              setFormData({
+                ...formData,
+                targetId: id,                // ✅ workerId(UUID)
+                targetName: w?.name ?? "",    // 표시용 이름
+              })
+            }}
+          >
+            <SelectTrigger className="mt-1.5">
+              <SelectValue placeholder="인력을 선택하세요" />
+            </SelectTrigger>
+            <SelectContent>
+              {(workersForSelect as any[]).map((w) => (
+                <SelectItem key={w.id} value={w.id}>
+                  {w.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <p className="text-xs text-muted-foreground mt-1">
+            인력별 예외는 UUID로 저장되어야 정확히 적용됩니다.
+          </p>
         </div>
       )}
       <div>
@@ -812,18 +862,6 @@ function WorkforceSettlementTab({
     if (!siteId) return
     loadSettlements()
   }, [siteId, period])
-
-  function getMonthRange(periodYm: string) {
-    // periodYm: "YYYY-MM"
-    const [yStr, mStr] = periodYm.split("-")
-    const y = Number(yStr)
-    const m = Number(mStr)
-    // 말일 계산: 다음달 0일
-    const endDate = new Date(y, m, 0)
-    const end = `${yStr}-${mStr}-${String(endDate.getDate()).padStart(2, "0")}`
-    const start = `${yStr}-${mStr}-01`
-    return { start, end }
-  }
 
 
   const loadSettlements = async () => {
@@ -973,6 +1011,61 @@ function WorkforceSettlementTab({
       setSaving(false)
     }
   }
+
+  const handleCreateAndPayPayout = async () => {
+    if (!siteId) return
+    if (!siteName) {
+      toast.error("siteName이 비어있습니다")
+      return
+    }
+
+    const selectedTargets = settlements.filter((s) => selectedIds.includes(s.id))
+    if (selectedTargets.length === 0) {
+      toast.error("선택된 정산 대상이 없습니다")
+      return
+    }
+
+    setSaving(true)
+    try {
+      const { start, end } = getMonthRange(period)
+
+      // 1) payout 생성 (서버 스펙: siteName, start, end, items)
+      const createRes = await fetch("/api/payouts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          siteId,
+          siteName,
+          start,
+          end,
+          method: "계좌이체",
+          memo: "", // 필요하면 입력 UI 연결
+          items: selectedTargets, // ✅ SettlementTarget[] 그대로 보냄
+        }),
+      })
+
+      const createJson = await createRes.json().catch(() => ({}))
+      if (!createRes.ok) throw new Error(createJson?.error ?? "지급 생성 실패")
+
+      const payoutId = createJson?.payoutId
+      if (!payoutId) throw new Error("payoutId가 응답에 없습니다")
+
+      // 2) payout 지급 완료 처리(단건)
+      const payRes = await fetch(`/api/payouts/${encodeURIComponent(payoutId)}/mark-paid`, {
+        method: "POST",
+      })
+      const payJson = await payRes.json().catch(() => ({}))
+      if (!payRes.ok) throw new Error(payJson?.error ?? "지급 완료 처리 실패")
+
+      toast.success("지급 완료 처리되었습니다")
+      setSelectedIds([])
+    } catch (e: any) {
+      toast.error(e?.message ?? "지급 처리 실패")
+    } finally {
+      setSaving(false)
+    }
+  }
+
 
   // Mark as settled
   const handleMarkSettled = async () => {
@@ -1152,6 +1245,17 @@ function WorkforceSettlementTab({
               <Lock className="mr-1.5 h-4 w-4" />
               정산 완료
             </Button>
+            {selectedIds.length > 0 && (
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={handleCreateAndPayPayout}
+                disabled={saving}
+              >
+                <Wallet className="mr-1.5 h-4 w-4" />
+                선택 지급 처리 ({selectedIds.length}명)
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -1753,19 +1857,32 @@ function PayoutManagementTab({
     loadData()
   }, [siteId, period])
 
+  function formatKst(iso: string) {
+    const d = new Date(iso)
+    return d.toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })
+  }
+
+
   const loadData = async () => {
     if (!siteId) return
     setLoading(true)
     try {
       const res = await fetch(
-        `/api/payouts?siteId=${encodeURIComponent(siteId)}&period=${encodeURIComponent(period)}`
+        `/api/payouts?siteId=${encodeURIComponent(siteId)}&period=${encodeURIComponent(period)}`,
+        { cache: "no-store" }
       )
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json?.error ?? "지급 데이터 로드 실패")
 
-      // 서버가 siteName을 비워서 줄 수도 있으니 여기서 채워도 됨
-      const payables = (json.payables ?? []).map((p: PayableItem) => ({ ...p, siteName }))
-      const history = (json.history ?? []).map((h: any) => ({ ...h, siteName }))
+      const json = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        throw new Error(json?.error ?? "지급 데이터 로드 실패")
+      }
+
+      const rawPayables = Array.isArray(json?.payables) ? json.payables : []
+      const rawHistory = Array.isArray(json?.history) ? json.history : []
+
+      const payables = rawPayables.map((p: any) => ({ ...p, siteName }))
+      const history = rawHistory.map((h: any) => ({ ...h, siteName }))
 
       setPayables(payables)
       setHistory(history)
@@ -1777,6 +1894,8 @@ function PayoutManagementTab({
       setLoading(false)
     }
   }
+
+
 
 
   const handleSelectAll = (checked: boolean) => {
@@ -1802,18 +1921,57 @@ function PayoutManagementTab({
   const handlePayout = async () => {
     setIsPaying(true)
     try {
-      const res = await fetch("/api/payouts/mark-paid", {
+      if (!siteId) throw new Error("siteId is required")
+      if (selectedPayableIds.length === 0) throw new Error("선택된 지급 항목이 없습니다")
+
+      // 1) 선택된 payable rows
+      const selected = payables.filter((p) => selectedPayableIds.includes(p.id))
+      if (selected.length === 0) throw new Error("선택된 지급 항목이 없습니다")
+
+      // 2) period(YYYY-MM) -> start/end(YYYY-MM-DD)
+      const { start, end } = getMonthRange(period)
+
+      // 3) payout 생성 payload(items)
+      const items = selected.map((p) => ({
+        payeeType: p.payeeType, // "WORKER" | "FOREMAN"
+        payeeId: p.payeeId,
+        payeeName: p.payeeName,
+        amount: p.amount,
+        // 서버에서 sourceMode/memberIds 등을 필수로 요구하면 여기서 추가
+      }))
+
+      // 4) payout 생성
+      const createRes = await fetch("/api/payouts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           siteId,
-          payableItemIds: selectedPayableIds,
-          memo: payoutMemo,
+          periodStart: start,
+          periodEnd: end,
           method: "계좌이체",
+          memo: payoutMemo,
+          items,
         }),
       })
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json?.error ?? "지급 처리 실패")
+
+      const createJson = await createRes.json().catch(() => ({}))
+      if (!createRes.ok) throw new Error(createJson?.error ?? "지급 생성 실패")
+
+      // 서버 응답 형태 방어적으로 처리
+      const payoutId =
+        createJson?.payout?.id ??
+        createJson?.payoutId ??
+        createJson?.id
+
+      if (!payoutId) throw new Error("payoutId가 응답에 없습니다")
+
+      // 5) payout 지급 완료 처리(단건) - 너가 준 서버 라우트와 정확히 매칭
+      const payRes = await fetch(`/api/payouts/${encodeURIComponent(payoutId)}/mark-paid`, {
+        method: "POST",
+      })
+
+      const payJson = await payRes.json().catch(() => ({}))
+      if (!payRes.ok) throw new Error(payJson?.error ?? "지급 완료 처리 실패")
 
       toast.success("지급 완료 처리되었습니다")
       setSelectedPayableIds([])
@@ -1826,6 +1984,7 @@ function PayoutManagementTab({
       setIsPaying(false)
     }
   }
+
 
 
   if (!siteId) {
@@ -1970,7 +2129,7 @@ function PayoutManagementTab({
                             {formatKoreanMoney(h.totalAmount)}
                           </CardTitle>
                           <CardDescription>
-                            {h.paidAt} | {h.paidByUserName} | {h.method}
+                            {formatKst(h.paidAt)} | {h.paidByUserName} | {h.method}
                           </CardDescription>
                         </div>
                         <Button variant="ghost" size="icon">

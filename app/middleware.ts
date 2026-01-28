@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server"
 
-const SESSION_COOKIE_NAME = "asdasd123123" // 세션 쿠키 이름이 다르면 여기만 바꾸세요
+import { SESSION_COOKIE_NAME } from "@/lib/server/session"
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
