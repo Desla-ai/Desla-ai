@@ -76,28 +76,48 @@ export function formatPhoneMasked(phone: string): string {
  * Format phone number without masking (full number)
  * Example: 01012345678 -> 010-1234-5678
  */
-export function formatPhone(phone: string): string {
-  const cleaned = phone.replace(/\D/g, "")
+export function formatPhone(phone: string | null | undefined): string {
+  // null/undefined/빈 문자열 방어
+  if (!phone) return "-"
+
+  const cleaned = String(phone).replace(/\D/g, "")
+
   if (cleaned.length === 11) {
     return `${cleaned.slice(0, 3)}-${cleaned.slice(3, 7)}-${cleaned.slice(7)}`
   }
   if (cleaned.length === 10) {
     return `${cleaned.slice(0, 3)}-${cleaned.slice(3, 6)}-${cleaned.slice(6)}`
   }
-  return phone
+
+  // 숫자만 남긴 게 비었으면 '-' 처리
+  return cleaned.length ? cleaned : "-"
 }
 
 /**
  * Format date to Korean format
  */
-export function formatKoreanDate(date: Date | string): string {
+export function formatKoreanDate(date: Date | string | null | undefined): string {
+  // null/undefined/빈문자열 방어
+  if (!date) return "-"
+
   const d = typeof date === "string" ? new Date(date) : date
+
+  // Invalid Date 방어
+  if (!(d instanceof Date) || isNaN(d.getTime())) return "-"
+
   return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, "0")}.${String(d.getDate()).padStart(2, "0")}`
 }
 
 /**
  * Format date range
  */
-export function formatDateRange(start: Date | string, end: Date | string): string {
-  return `${formatKoreanDate(start)} - ${formatKoreanDate(end)}`
+export function formatDateRange(
+  start: Date | string | null | undefined,
+  end: Date | string | null | undefined
+): string {
+  const s = formatKoreanDate(start)
+  const e = formatKoreanDate(end)
+
+  if (s === "-" && e === "-") return "-"
+  return `${s} - ${e}`
 }

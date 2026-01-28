@@ -51,21 +51,45 @@ export default function RecordsPage() {
   const [snapshotToRestore, setSnapshotToRestore] = useState<AppSnapshot | null>(null)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [snapshotToDelete, setSnapshotToDelete] = useState<AppSnapshot | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
+  const [isRestoring, setIsRestoring] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+
 
   useEffect(() => {
-    setSnapshots(getSnapshots())
+    ; (async () => {
+      const list = await getSnapshots()
+      setSnapshots(list)
+    })()
   }, [getSnapshots])
 
-  const handleSave = () => {
+  const refreshSnapshots = async () => {
+    const list = await getSnapshots()
+    setSnapshots(list)
+  }
+
+  const handleSave = async () => {
+    if (isSaving) return
     if (!snapshotTitle.trim()) {
       toast.error("스냅샷 제목을 입력해주세요")
       return
     }
-    saveSnapshot(snapshotTitle.trim())
-    setSnapshots(getSnapshots())
-    setSaveDialogOpen(false)
-    setSnapshotTitle("")
-    toast.success("스냅샷이 저장되었습니다")
+
+    try {
+      setIsSaving(true)
+      await saveSnapshot(snapshotTitle.trim())
+
+      const list = await getSnapshots()
+      setSnapshots(list)
+
+      setSaveDialogOpen(false)
+      setSnapshotTitle("")
+      toast.success("스냅샷이 저장되었습니다")
+    } catch {
+      toast.error("스냅샷 저장에 실패했습니다")
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   const handleRestoreClick = (snapshot: AppSnapshot) => {
@@ -73,12 +97,25 @@ export default function RecordsPage() {
     setRestoreDialogOpen(true)
   }
 
-  const handleRestoreConfirm = () => {
-    if (snapshotToRestore) {
-      loadSnapshot(snapshotToRestore)
+  const handleRestoreConfirm = async () => {
+    if (isRestoring) return
+    if (!snapshotToRestore) return
+
+    try {
+      setIsRestoring(true)
+      await loadSnapshot(snapshotToRestore)
+
       setRestoreDialogOpen(false)
       setSnapshotToRestore(null)
       toast.success("스냅샷이 복원되었습니다")
+
+      // 복원 후 목록 갱신(선택)
+      const list = await getSnapshots()
+      setSnapshots(list)
+    } catch {
+      toast.error("복원에 실패했습니다")
+    } finally {
+      setIsRestoring(false)
     }
   }
 
@@ -87,16 +124,26 @@ export default function RecordsPage() {
     setDeleteDialogOpen(true)
   }
 
-  const handleDeleteConfirm = () => {
-    if (snapshotToDelete) {
-      deleteSnapshot(snapshotToDelete.id)
-      setSnapshots(getSnapshots())
+  const handleDeleteConfirm = async () => {
+    if (isDeleting) return
+    if (!snapshotToDelete) return
+
+    try {
+      setIsDeleting(true)
+      await deleteSnapshot(snapshotToDelete.id)
+
+      const list = await getSnapshots()
+      setSnapshots(list)
+
       setDeleteDialogOpen(false)
       setSnapshotToDelete(null)
       toast.success("스냅샷이 삭제되었습니다")
+    } catch {
+      toast.error("삭제에 실패했습니다")
+    } finally {
+      setIsDeleting(false)
     }
   }
-
   const formatTimestamp = (timestamp: string) => {
     const date = new Date(timestamp)
     return date.toLocaleString("ko-KR", {
@@ -310,9 +357,8 @@ export default function RecordsPage() {
             <Button variant="outline" onClick={() => setSaveDialogOpen(false)}>
               취소
             </Button>
-            <Button onClick={handleSave}>
-              <Save className="mr-2 h-4 w-4" />
-              저장
+            <Button onClick={handleSave} disabled={isSaving}>
+              {isSaving ? "저장 중..." : "저장"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -334,9 +380,9 @@ export default function RecordsPage() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>취소</AlertDialogCancel>
-            <AlertDialogAction onClick={handleRestoreConfirm}>
+            <AlertDialogAction onClick={handleRestoreConfirm} disabled={isRestoring}>
               <RotateCcw className="mr-2 h-4 w-4" />
-              복원
+              {isRestoring ? "복원 중..." : "복원"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -359,11 +405,11 @@ export default function RecordsPage() {
           <AlertDialogFooter>
             <AlertDialogCancel>취소</AlertDialogCancel>
             <AlertDialogAction
-              onClick={handleDeleteConfirm}
+              onClick={handleDeleteConfirm} disabled={isDeleting}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               <Trash2 className="mr-2 h-4 w-4" />
-              삭제
+              {isDeleting ? "삭제 중..." : "삭제"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

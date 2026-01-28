@@ -254,13 +254,13 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
   const filteredPoolWorkers = useMemo(() => {
     if (!poolSearch.trim()) return globalPoolWorkers
     const query = poolSearch.toLowerCase()
-    return globalPoolWorkers.filter(
-      (w) =>
-        w.name.toLowerCase().includes(query) ||
-        w.phone.includes(query) ||
-        w.roles.some((r) => r.name.toLowerCase().includes(query)) ||
-        (w.team && w.team.toLowerCase().includes(query))
-    )
+    return globalPoolWorkers.filter((w) => {
+      const nameOk = (w.name ?? "").toLowerCase().includes(query)
+      const phoneOk = (w.phone ?? "").includes(query)
+      const rolesOk = (w.roles ?? []).some((r) => (r.name ?? "").toLowerCase().includes(query))
+      const teamOk = (w.team ?? "").toLowerCase().includes(query)
+      return nameOk || phoneOk || rolesOk || teamOk
+    })
   }, [globalPoolWorkers, poolSearch])
 
   useEffect(() => {
@@ -921,7 +921,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                                 )}
                               </div>
                               <div className="flex flex-wrap gap-1 mt-0.5">
-                                {worker.roles.slice(0, 2).map((role) => (
+                                {(worker.roles ?? []).slice(0, 2).map((role) => (
                                   <span
                                     key={role.id}
                                     className="text-[10px] px-1 rounded"
@@ -995,7 +995,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                               )}
                             </div>
                             <div className="flex flex-wrap gap-1 mt-0.5">
-                              {worker.roles.slice(0, 2).map((role) => (
+                              {(worker.roles ?? []).slice(0, 2).map((role) => (
                                 <span
                                   key={role.id}
                                   className="text-[10px] px-1 rounded"
@@ -1695,7 +1695,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                 <div>
                   <Label className="text-xs text-muted-foreground">역할</Label>
                   <div className="flex flex-wrap gap-1 mt-1">
-                    {selectedWorker.roles.map((role) => (
+                    {(selectedWorker.roles ?? []).map((role) => (
                       <Badge
                         key={role.id}
                         style={{ backgroundColor: `${role.color}20`, color: role.color }}
