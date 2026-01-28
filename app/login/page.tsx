@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth-context"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { toast } from "sonner"
 import { Loader2 } from "lucide-react"
@@ -28,14 +29,14 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    
+
     if (!username || !password) {
       toast.error("아이디와 비밀번호를 입력해주세요")
       return
     }
 
     setIsLoading(true)
-    
+
     try {
       const success = await login(username, password)
       if (success) {
@@ -109,9 +110,12 @@ export default function LoginPage() {
                 "로그인"
               )}
             </Button>
-            <p className="text-center text-xs text-muted-foreground">
-              테스트 계정: admin / admin
-            </p>
+            <Link
+              href="/signup"
+              className="mt-3 h-11 rounded-lg border border-gray-300 bg-white flex items-center justify-center font-semibold text-gray-900"
+            >
+              회원가입
+            </Link>
           </form>
         </CardContent>
       </Card>

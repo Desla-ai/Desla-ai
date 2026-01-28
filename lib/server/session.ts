@@ -25,7 +25,7 @@ export function createSessionCookie(payload: Omit<SessionPayload, "exp">, ttlSec
   const json = JSON.stringify(body);
   const b64 = base64url(json);
   const sig = sign(b64);
-  return { name: COOKIE_NAME, value: `${b64}.${sig}`, exp };
+  return { name: COOKIE_NAME, value: `${b64}.${sig}`, exp , maxAge: ttlSeconds };
 }
 
 export function verifySessionCookie(cookieValue: string | undefined): SessionPayload | null {

@@ -1,6 +1,7 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useState } from "react"
+import Link from "next/link"
 import { AppShell } from "@/components/layout/app-shell"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -31,7 +32,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { useAppStore, type AppSnapshot } from "@/lib/app-store"
-import { formatKoreanMoney, formatKoreanDate } from "@/lib/format"
+import { formatKoreanDate } from "@/lib/format"
 import {
   Save,
   MessageSquare,
@@ -45,9 +46,24 @@ import {
   User,
   Bell,
   Cog,
+  KeyRound,
+  Copy,
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
+
+function coerceSnapshots(value: unknown): AppSnapshot[] {
+  // getSnapshots()가 배열을 반환하는 게 가장 이상적이지만,
+  // 과도기(로컬스토리지/서버 전환)에서 형태가 섞일 수 있으므로 여기서 방어한다.
+  if (Array.isArray(value)) return value as AppSnapshot[]
+
+  // { snapshots: [...] } 형태
+  if (value && typeof value === "object" && Array.isArray((value as any).snapshots)) {
+    return (value as any).snapshots as AppSnapshot[]
+  }
+
+  return []
+}
 
 export default function SettingsPage() {
   const {
@@ -63,13 +79,23 @@ export default function SettingsPage() {
   const [editingTemplate, setEditingTemplate] = useState<string | null>(null)
   const [editTemplateContent, setEditTemplateContent] = useState("")
 
-  // Snapshot management
-  const [snapshots, setSnapshots] = useState<AppSnapshot[]>(() => getSnapshots())
+  // Snapshot management (✅ 초기값을 무조건 배열로 정규화)
+  const [snapshots, setSnapshots] = useState<AppSnapshot[]>(() => coerceSnapshots(getSnapshots()))
   const [newSnapshotTitle, setNewSnapshotTitle] = useState("")
   const [saveSnapshotDialogOpen, setSaveSnapshotDialogOpen] = useState(false)
   const [loadSnapshotDialogOpen, setLoadSnapshotDialogOpen] = useState(false)
   const [selectedSnapshot, setSelectedSnapshot] = useState<AppSnapshot | null>(null)
   const [deleteSnapshotId, setDeleteSnapshotId] = useState<string | null>(null)
+
+  // ✅ 초대코드 발급 UI 상태
+  const [inviteCode, setInviteCode] = useState<string>("")
+  const [inviteExpiresAt, setInviteExpiresAt] = useState<string>("")
+  const [isIssuingInvite, setIsIssuingInvite] = useState(false)
+
+  const totalWorkersInSnapshot = useMemo(() => {
+    // snapshots.map 관련 크래시 예방: snapshots는 항상 배열
+    return snapshots.reduce((acc, s) => acc + (s?.metrics?.waitingWorkers ?? 0) + (s?.metrics?.assignedWorkers ?? 0), 0)
+  }, [snapshots])
 
   const handleSave = () => {
     toast.success("설정이 저장되었습니다")
@@ -94,36 +120,101 @@ export default function SettingsPage() {
     setEditTemplateContent("")
   }
 
-  const handleSaveSnapshot = () => {
+  // ✅ getSnapshots가 향후 async로 바뀌어도 SettingsPage는 깨지지 않도록 흡수
+  const refreshSnapshots = async () => {
+    try {
+      const result = await Promise.resolve(getSnapshots() as any)
+      setSnapshots(coerceSnapshots(result))
+    } catch (e) {
+      console.error(e)
+      setSnapshots([])
+      toast.error("스냅샷 목록을 불러오지 못했습니다")
+    }
+  }
+
+  useEffect(() => {
+    // 첫 렌더 후 한 번 더 안전하게 갱신(스토어 hydrate 타이밍 이슈 방어)
+    void refreshSnapshots()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const handleSaveSnapshot = async () => {
     if (!newSnapshotTitle.trim()) {
       toast.error("스냅샷 이름을 입력해주세요")
       return
     }
-    const snapshot = saveSnapshot(newSnapshotTitle.trim())
-    setSnapshots(getSnapshots())
-    setSaveSnapshotDialogOpen(false)
-    setNewSnapshotTitle("")
-    toast.success(`"${snapshot.title}" 스냅샷이 저장되었습니다`)
+
+    try {
+      const snapshot = await Promise.resolve(saveSnapshot(newSnapshotTitle.trim()) as any)
+      await refreshSnapshots()
+      setSaveSnapshotDialogOpen(false)
+      setNewSnapshotTitle("")
+      toast.success(`"${snapshot?.title ?? "스냅샷"}" 스냅샷이 저장되었습니다`)
+    } catch (e) {
+      console.error(e)
+      toast.error("스냅샷 저장에 실패했습니다")
+    }
   }
 
-  const handleLoadSnapshot = () => {
+  const handleLoadSnapshot = async () => {
     if (!selectedSnapshot) return
-    loadSnapshot(selectedSnapshot)
-    setLoadSnapshotDialogOpen(false)
-    setSelectedSnapshot(null)
-    toast.success(`"${selectedSnapshot.title}" 스냅샷을 불러왔습니다`)
+    try {
+      await Promise.resolve(loadSnapshot(selectedSnapshot) as any)
+      setLoadSnapshotDialogOpen(false)
+      setSelectedSnapshot(null)
+      toast.success(`"${selectedSnapshot.title}" 스냅샷을 불러왔습니다`)
+    } catch (e) {
+      console.error(e)
+      toast.error("스냅샷 불러오기에 실패했습니다")
+    }
   }
 
-  const handleDeleteSnapshot = () => {
+  const handleDeleteSnapshot = async () => {
     if (!deleteSnapshotId) return
-    deleteSnapshot(deleteSnapshotId)
-    setSnapshots(getSnapshots())
-    setDeleteSnapshotId(null)
-    toast.success("스냅샷이 삭제되었습니다")
+    try {
+      await Promise.resolve(deleteSnapshot(deleteSnapshotId) as any)
+      await refreshSnapshots()
+      setDeleteSnapshotId(null)
+      toast.success("스냅샷이 삭제되었습니다")
+    } catch (e) {
+      console.error(e)
+      toast.error("스냅샷 삭제에 실패했습니다")
+    }
   }
 
-  const refreshSnapshots = () => {
-    setSnapshots(getSnapshots())
+  const handleIssueInviteCode = async () => {
+    setIsIssuingInvite(true)
+    try {
+      const res = await fetch("/api/admin/invitations", { method: "POST" })
+      const json = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        const msg =
+          json?.error ??
+          (res.status === 401 ? "로그인이 필요합니다" : `초대코드 발급 실패 (${res.status})`)
+        toast.error(msg)
+        return
+      }
+
+      setInviteCode(String(json.inviteCode ?? ""))
+      setInviteExpiresAt(String(json.expiresAt ?? ""))
+      toast.success("초대코드를 발급했습니다")
+    } catch (e) {
+      console.error(e)
+      toast.error("초대코드 발급 중 오류가 발생했습니다")
+    } finally {
+      setIsIssuingInvite(false)
+    }
+  }
+
+  const handleCopyInviteCode = async () => {
+    if (!inviteCode) return
+    try {
+      await navigator.clipboard.writeText(inviteCode)
+      toast.success("초대코드를 복사했습니다")
+    } catch {
+      toast.error("복사에 실패했습니다")
+    }
   }
 
   return (
@@ -238,7 +329,8 @@ export default function SettingsPage() {
                       SMS 템플릿 관리
                     </CardTitle>
                     <CardDescription>
-                      인력에게 발송할 SMS 템플릿을 관리합니다. 변수: {'{siteName}'}, {'{date}'}, {'{checkInTime}'}, {'{address}'}, {'{officePhone}'}, {'{message}'}
+                      인력에게 발송할 SMS 템플릿을 관리합니다. 변수:{" "}
+                      {"{siteName}"}, {"{date}"}, {"{checkInTime}"}, {"{address}"}, {"{officePhone}"}, {"{message}"}
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="flex flex-col gap-4">
@@ -281,7 +373,13 @@ export default function SettingsPage() {
                         <Save className="h-4 w-4 mr-2" />
                         현재 상태 저장
                       </Button>
-                      <Button variant="outline" onClick={() => { refreshSnapshots(); setLoadSnapshotDialogOpen(true) }}>
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          await refreshSnapshots()
+                          setLoadSnapshotDialogOpen(true)
+                        }}
+                      >
                         <Upload className="h-4 w-4 mr-2" />
                         스냅샷 불러오기
                       </Button>
@@ -294,18 +392,26 @@ export default function SettingsPage() {
                         </div>
                         <ScrollArea className="max-h-[240px]">
                           {snapshots.map((snapshot) => (
-                            <div key={snapshot.id} className="flex items-center justify-between p-3 border-b border-border last:border-0 hover:bg-muted/30">
+                            <div
+                              key={snapshot.id}
+                              className="flex items-center justify-between p-3 border-b border-border last:border-0 hover:bg-muted/30"
+                            >
                               <div className="flex flex-col gap-1">
                                 <span className="font-medium text-sm">{snapshot.title}</span>
                                 <span className="text-xs text-muted-foreground">
-                                  {formatKoreanDate(snapshot.timestamp.split("T")[0])} • 현장 {snapshot.metrics.siteCount}개 • 인력 {snapshot.metrics.waitingWorkers + snapshot.metrics.assignedWorkers}명
+                                  {formatKoreanDate(snapshot.timestamp.split("T")[0])} • 현장{" "}
+                                  {snapshot.metrics.siteCount}개 • 인력{" "}
+                                  {snapshot.metrics.waitingWorkers + snapshot.metrics.assignedWorkers}명
                                 </span>
                               </div>
                               <div className="flex items-center gap-1">
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  onClick={() => { setSelectedSnapshot(snapshot); setLoadSnapshotDialogOpen(true) }}
+                                  onClick={() => {
+                                    setSelectedSnapshot(snapshot)
+                                    setLoadSnapshotDialogOpen(true)
+                                  }}
                                 >
                                   <Upload className="h-4 w-4" />
                                 </Button>
@@ -323,12 +429,71 @@ export default function SettingsPage() {
                         </ScrollArea>
                       </div>
                     )}
+
+                    {snapshots.length === 0 && (
+                      <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+                        저장된 스냅샷이 없습니다
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               </TabsContent>
 
               {/* System Tab */}
               <TabsContent value="system" className="space-y-6">
+                {/* ✅ 초대코드 발급 */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <KeyRound className="h-4 w-4" />
+                      초대코드 발급
+                    </CardTitle>
+                    <CardDescription>
+                      같은 오피스에 참여할 사용자를 초대할 수 있습니다. 초대코드는 24시간 후 만료되며 1회만 사용할 수 있습니다.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <Button onClick={handleIssueInviteCode} disabled={isIssuingInvite}>
+                        {isIssuingInvite ? "발급 중..." : "초대코드 발급"}
+                      </Button>
+
+                      {inviteCode ? (
+                        <Button variant="outline" onClick={handleCopyInviteCode}>
+                          <Copy className="h-4 w-4 mr-2" />
+                          복사
+                        </Button>
+                      ) : null}
+
+                      <Link href="/signup" className="text-sm text-muted-foreground underline underline-offset-4">
+                        회원가입 페이지로 이동
+                      </Link>
+                    </div>
+
+                    {inviteCode ? (
+                      <div className="rounded-lg border border-border p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex flex-col gap-1">
+                            <div className="text-sm font-medium">발급된 초대코드</div>
+                            <div className="font-mono text-base">{inviteCode}</div>
+                            {inviteExpiresAt ? (
+                              <div className="text-xs text-muted-foreground">
+                                만료: {inviteExpiresAt}
+                              </div>
+                            ) : null}
+                          </div>
+                          <Badge variant="outline">24h</Badge>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-muted-foreground">
+                        초대코드를 발급하면 여기에서 확인하고 복사할 수 있어요.
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* 기존 시스템 설정 */}
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">시스템 설정</CardTitle>

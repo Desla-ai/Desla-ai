@@ -123,23 +123,31 @@ export default function WorkersPage() {
     toast.success(`${worker.name}님이 ${newStatus}(으)로 변경되었습니다`)
   }
 
-  const handleAddWorker = () => {
+  const handleAddWorker = async () => {
     if (!newWorkerName.trim() || !newWorkerPhone.trim()) {
       toast.error("이름과 전화번호를 입력해주세요")
       return
     }
-    addWorker({
-      name: newWorkerName,
-      phone: newWorkerPhone.replace(/\D/g, ""),
-      roles: state.roles.filter((r) => newWorkerRoles.includes(r.id)),
-      team: newWorkerTeam || null,
-      status: "미출근", // Default to 미출근
-      lastAttendance: null,
-    })
-    toast.success("새 인력이 등록되었습니다")
-    setAddWorkerDialogOpen(false)
-    resetNewWorkerForm()
+
+    try {
+      await addWorker({
+        name: newWorkerName,
+        phone: newWorkerPhone.replace(/\D/g, ""),
+        roles: state.roles.filter((r) => newWorkerRoles.includes(r.id)), // 이제 r.id가 uuid
+        team: newWorkerTeam || null,
+        status: "미출근",
+        lastAttendance: null,
+      })
+
+      toast.success("새 인력이 등록되었습니다")
+      setAddWorkerDialogOpen(false)
+      resetNewWorkerForm()
+    } catch (e: any) {
+      toast.error(e?.message ?? "인력 등록에 실패했습니다")
+    }
   }
+
+
 
   const resetNewWorkerForm = () => {
     setNewWorkerName("")

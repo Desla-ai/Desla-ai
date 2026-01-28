@@ -194,14 +194,13 @@ function buildInitialState(): AppState {
 // Context type
 interface AppStoreContextType {
   state: AppState
-  // Sites
-  addSite: (site: Omit<Site, "id">) => void
-  updateSite: (site: Site) => void
-  deleteSite: (siteId: string) => void
-  // Workers
-  addWorker: (worker: Omit<Worker, "id">) => void
-  updateWorker: (worker: Worker) => void
-  deleteWorker: (workerId: string) => void
+  addSite: (site: Omit<Site, "id">) => Promise<void>
+  updateSite: (site: Site) => Promise<void>
+  deleteSite: (siteId: string) => Promise<void>
+
+  addWorker: (worker: Omit<Worker, "id">) => Promise<void>
+  updateWorker: (worker: Worker) => Promise<void>
+  deleteWorker: (workerId: string) => Promise<void>
   // Assignments
   updateAssignment: (assignment: SiteAssignment) => void
   moveWorkerToWaiting: (workerId: string, siteId: string) => void
@@ -248,20 +247,23 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         }
 
         // DB 모드: 기본 뼈대는 유지하고 sites/workers만 서버에서 주입
-        const [sitesRes, workersRes] = await Promise.all([
+        const [sitesRes, workersRes, rolesRes] = await Promise.all([
           fetch("/api/sites", { method: "GET" }),
           fetch("/api/workers", { method: "GET" }),
+          fetch("/api/roles", { method: "GET" }),
         ])
 
-        if (!sitesRes.ok || !workersRes.ok) throw new Error("DB fetch failed")
+        if (!sitesRes.ok || !workersRes.ok || !rolesRes.ok) throw new Error("DB fetch failed")
 
         const sitesJson = await sitesRes.json()
         const workersJson = await workersRes.json()
+        const rolesJson = await rolesRes.json()
 
         setState((prev) => ({
           ...prev,
           sites: sitesJson.sites ?? [],
           workers: workersJson.workers ?? [],
+          roles: rolesJson.roles ?? [], // ✅ 이 한 줄 때문에 UI 역할이 살아남
           // assignments는 다음 단계에서 DB로 옮김 (지금은 prev 유지)
         }))
       } catch {
@@ -315,9 +317,20 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: site.name,
-        start_date: (site as any).startDate ?? (site as any).start_date ?? null,
-        end_date: (site as any).endDate ?? (site as any).end_date ?? null,
-        todayRequired: (site as any).todayRequired ?? 0,
+        address: site.address,
+        status: site.status,
+
+        // 날짜 (YYYY-MM-DD)
+        start_date: site.startDate ?? null,
+        end_date: site.endDate ?? null,
+
+        // 인원 (number)
+        planned_workers: Number(site.plannedWorkers ?? 0),
+        today_required: Number(site.todayRequired ?? 0),
+
+        // 시간/전화 (string)
+        check_in_time: site.checkInTime ?? "",
+        office_phone: site.officePhone ?? "",
       }),
     });
     if (!res.ok) return;
@@ -349,19 +362,17 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     const res = await fetch("/api/workers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...workerData,
-        // 필요하면 필드명 맞춰서 전달
-      }),
-    });
-    if (!res.ok) return;
+      body: JSON.stringify(workerData),
+    })
 
-    const { worker } = await res.json();
-    setState((prev) => ({
-      ...prev,
-      workers: [worker, ...prev.workers],
-    }));
-  }, []);
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(json?.error ?? "인력 등록 실패")
+
+    const worker = json.worker
+    setState((prev) => ({ ...prev, workers: [worker, ...prev.workers] }))
+  }, [])
+
+
 
   const updateWorker = useCallback(async (worker: Worker) => {
     const res = await fetch(`/api/workers/${worker.id}`, {
@@ -370,20 +381,25 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       body: JSON.stringify({
         name: worker.name,
         phone: (worker as any).phone ?? null,
-        craft: (worker as any).craft ?? null,
         status: (worker as any).status ?? "미출근",
         is_fixed: (worker as any).isFixed ?? (worker as any).is_fixed ?? false,
         assigned_site_id: (worker as any).assignedSiteId ?? (worker as any).assigned_site_id ?? null,
+
+        // ✅ 역할 저장(서버 PATCH가 role_ids 처리 이미 하고 있음)
+        role_ids: (worker.roles ?? []).map((r: any) => r.id),
       }),
     });
-    if (!res.ok) return;
 
-    const { worker: updated } = await res.json();
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error ?? "worker update failed");
+
+    const updated = json.worker;
     setState((prev) => ({
       ...prev,
       workers: prev.workers.map((w) => (w.id === updated.id ? updated : w)),
     }));
   }, []);
+
 
   const deleteWorker = useCallback(async (workerId: string) => {
     const res = await fetch(`/api/workers/${workerId}`, { method: "DELETE" });

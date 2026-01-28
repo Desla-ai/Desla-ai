@@ -279,13 +279,13 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
   const handleOpenSettings = () => {
     if (site) {
       setEditSiteName(site.name)
-      setEditSiteAddress(site.address)
-      setEditSiteStartDate(site.startDate)
-      setEditSiteEndDate(site.endDate)
+      setEditSiteAddress(site.address ?? "")
+      setEditSiteStartDate(site.startDate ?? "")
+      setEditSiteEndDate(site.endDate ?? "")
       setEditSitePlannedWorkers(String(site.plannedWorkers))
       setEditSiteTodayRequired(String(site.todayRequired))
-      setEditSiteCheckInTime(site.checkInTime)
-      setEditSiteOfficePhone(site.officePhone)
+      setEditSiteCheckInTime(site.checkInTime ?? "")
+      setEditSiteOfficePhone(site.officePhone ?? "")
       setSettingsDialogOpen(true)
     }
   }
@@ -1562,7 +1562,10 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
               </div>
               <div>
                 <Label>사무소 전화</Label>
-                <Input value={editSiteOfficePhone} onChange={(e) => setEditSiteOfficePhone(e.target.value)} />
+                <Input
+                  value={editSiteOfficePhone ?? ""}
+                  onChange={(e) => setEditSiteOfficePhone(e.target.value)}
+                />
               </div>
             </div>
 
