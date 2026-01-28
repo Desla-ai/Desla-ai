@@ -362,7 +362,7 @@ function SettlementConfigTab({
       const res = await fetch("/api/settlement-rules", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(rule),
+        body: JSON.stringify({ rule }),
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(json?.error ?? "규칙 저장 실패")
