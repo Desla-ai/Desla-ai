@@ -948,16 +948,18 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                   <h3 className="font-medium text-sm">당일 배치</h3>
                   <Badge variant="secondary">{dailyAssignedWorkers.length}명</Badge>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full h-7 text-xs bg-transparent"
-                  onClick={() => setShowNextDayDialog(true)}
-                  disabled={dailyAssignedWorkers.length === 0}
-                >
-                  <RotateCcw className="mr-1.5 h-3 w-3" />
-                  다음 날로 넘기기
-                </Button>
+                {false && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full h-7 text-xs bg-transparent"
+                    onClick={() => setShowNextDayDialog(true)}
+                    disabled={dailyAssignedWorkers.length === 0}
+                  >
+                    <RotateCcw className="mr-1.5 h-3 w-3" />
+                    다음 날로 넘기기
+                  </Button>
+                )}
               </div>
               <ScrollArea className="flex-1">
                 <div
@@ -1075,7 +1077,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
           </div>
         </TabsContent>
 
-        
+
 
         {/* 당일 정산 Tab Content - Today's wages */}
         <TabsContent value="당일정산" className="flex-1 m-0 overflow-hidden">

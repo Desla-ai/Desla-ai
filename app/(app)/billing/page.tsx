@@ -47,12 +47,12 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useAppStore } from "@/lib/app-store"
 import { formatKoreanMoney, formatKoreanDate } from "@/lib/format"
-import { 
-  FileText, 
-  Plus, 
-  Trash2, 
-  ChevronDown, 
-  Receipt, 
+import {
+  FileText,
+  Plus,
+  Trash2,
+  ChevronDown,
+  Receipt,
   AlertCircle,
   Building2,
   CheckCircle2,
@@ -111,7 +111,7 @@ const statusConfig: Record<InvoiceStatus, { color: string; icon: typeof Clock }>
 
 export default function BillingPage() {
   const { state } = useAppStore()
-  
+
   // Invoice state (would be stored in global state in production)
   const [invoices, setInvoices] = useState<Invoice[]>([
     {
@@ -185,7 +185,7 @@ export default function BillingPage() {
   // Create invoice dialog
   const [createDialogOpen, setCreateDialogOpen] = useState(false)
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null)
-  
+
   // New invoice form
   const [newInvoiceSiteId, setNewInvoiceSiteId] = useState("")
   const [newInvoiceContractor, setNewInvoiceContractor] = useState("")
@@ -199,7 +199,7 @@ export default function BillingPage() {
     const draft = invoices.filter(i => i.status === "초안")
     const issued = invoices.filter(i => i.status === "발행")
     const paid = invoices.filter(i => i.status === "입금완료")
-    
+
     return {
       draftCount: draft.length,
       draftTotal: draft.reduce((sum, i) => sum + i.total, 0),
@@ -215,7 +215,7 @@ export default function BillingPage() {
     return invoices.filter(inv => {
       const matchesStatus = statusFilter === "all" || inv.status === statusFilter
       const matchesSite = siteFilter === "all" || inv.siteId === siteFilter
-      const matchesSearch = search === "" || 
+      const matchesSearch = search === "" ||
         inv.invoiceNumber.toLowerCase().includes(search.toLowerCase()) ||
         inv.siteName.toLowerCase().includes(search.toLowerCase()) ||
         inv.contractorName.toLowerCase().includes(search.toLowerCase())
@@ -264,10 +264,10 @@ export default function BillingPage() {
       toast.error("건설사명을 입력해주세요")
       return
     }
-    
+
     const site = state.sites.find(s => s.id === newInvoiceSiteId)
     const { subtotal, tax, total } = calculateTotals()
-    
+
     const newInvoice: Invoice = {
       id: `inv${Date.now()}`,
       invoiceNumber: `INV-2025-${String(invoices.length + 1).padStart(3, "0")}`,
@@ -286,7 +286,7 @@ export default function BillingPage() {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }
-    
+
     setInvoices(prev => [newInvoice, ...prev])
     toast.success("청구서가 생성되었습니다")
     resetForm()
@@ -305,7 +305,7 @@ export default function BillingPage() {
   const handleStatusChange = (invoiceId: string, newStatus: InvoiceStatus) => {
     setInvoices(prev => prev.map(inv => {
       if (inv.id === invoiceId) {
-        const updates: Partial<Invoice> = { 
+        const updates: Partial<Invoice> = {
           status: newStatus,
           updatedAt: new Date().toISOString()
         }
@@ -520,7 +520,7 @@ export default function BillingPage() {
                                   PDF 다운로드
                                 </DropdownMenuItem>
                                 {invoice.status === "초안" && (
-                                  <DropdownMenuItem 
+                                  <DropdownMenuItem
                                     className="text-destructive"
                                     onClick={() => handleDeleteInvoice(invoice.id)}
                                   >
@@ -544,13 +544,13 @@ export default function BillingPage() {
 
       {/* Create Invoice Dialog */}
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+        <DialogContent className="sm:max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle>새 청구서 작성</DialogTitle>
             <DialogDescription>건설사에 발행할 청구서를 작성합니다</DialogDescription>
           </DialogHeader>
-          
-          <ScrollArea className="flex-1 -mx-6 px-6">
+
+          <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
             <div className="grid gap-6 py-4">
               {/* Basic Info */}
               <div className="grid gap-4 sm:grid-cols-2">
@@ -590,55 +590,61 @@ export default function BillingPage() {
                     항목 추가
                   </Button>
                 </div>
-                
+
                 <div className="space-y-2">
                   {newInvoiceLineItems.map((item, index) => (
-                    <div key={item.id} className="flex items-start gap-2 rounded-lg border border-border p-3">
-                      <Select
-                        value={item.category}
-                        onValueChange={(v) => updateLineItem(index, { category: v as LineItemCategory })}
-                      >
-                        <SelectTrigger className="w-[100px]">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {lineItemCategories.map((cat) => (
-                            <SelectItem key={cat} value={cat}>{cat}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <Input
-                        value={item.description}
-                        onChange={(e) => updateLineItem(index, { description: e.target.value })}
-                        placeholder="내역"
-                        className="flex-1"
-                      />
-                      <Input
-                        type="number"
-                        value={item.quantity}
-                        onChange={(e) => updateLineItem(index, { quantity: Number(e.target.value) })}
-                        className="w-16 text-center"
-                        min={1}
-                      />
-                      <Input
-                        type="number"
-                        value={item.unitPrice}
-                        onChange={(e) => updateLineItem(index, { unitPrice: Number(e.target.value) })}
-                        className="w-28"
-                        placeholder="단가"
-                      />
-                      <div className="w-28 text-right text-sm font-medium py-2">
-                        {formatKoreanMoney(item.amount)}
+                    <div key={item.id} className="grid grid-cols-1 gap-3 rounded-lg border border-border p-3 sm:flex sm:items-start sm:gap-2">
+                      <div className="flex gap-2">
+                        <Select
+                          value={item.category}
+                          onValueChange={(v) => updateLineItem(index, { category: v as LineItemCategory })}
+                        >
+                          <SelectTrigger className="w-[100px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {lineItemCategories.map((cat) => (
+                              <SelectItem key={cat} value={cat}>{cat}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Input
+                          value={item.description}
+                          onChange={(e) => updateLineItem(index, { description: e.target.value })}
+                          placeholder="내역"
+                          className="flex-1"
+                        />
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-9 w-9 shrink-0"
-                        onClick={() => removeLineItem(index)}
-                        disabled={newInvoiceLineItems.length <= 1}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      <div className="flex items-center justify-between gap-2 sm:justify-end">
+                        <div className="flex items-center gap-2">
+                          <Input
+                            type="number"
+                            value={item.quantity}
+                            onChange={(e) => updateLineItem(index, { quantity: Number(e.target.value) })}
+                            className="w-16 text-center"
+                            min={1}
+                          />
+                          <Input
+                            type="number"
+                            value={item.unitPrice}
+                            onChange={(e) => updateLineItem(index, { unitPrice: Number(e.target.value) })}
+                            className="w-28"
+                            placeholder="단가"
+                          />
+                        </div>
+                        <div className="w-28 text-right text-sm font-medium py-2">
+                          {formatKoreanMoney(item.amount)}
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-9 w-9 shrink-0"
+                          onClick={() => removeLineItem(index)}
+                          disabled={newInvoiceLineItems.length <= 1}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -686,9 +692,9 @@ export default function BillingPage() {
                 </div>
               </div>
             </div>
-          </ScrollArea>
+          </div>
 
-          <DialogFooter className="border-t border-border pt-4 mt-4">
+          <DialogFooter className="border-t border-border pt-4 mt-4 flex-col gap-2 sm:flex-row sm:justify-end">
             <Button variant="outline" onClick={() => { resetForm(); setCreateDialogOpen(false) }}>
               취소
             </Button>

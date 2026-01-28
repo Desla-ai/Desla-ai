@@ -143,6 +143,8 @@ const defaultSmsTemplates: SmsTemplate[] = [
   },
 ]
 
+const USE_DB = true; // DB 적용 단계에서는 true
+
 // Initial state builder
 function buildInitialState(): AppState {
   const assignments: SiteAssignment[] = mockSites.map((site) => {
@@ -236,76 +238,157 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
   // Hydrate from localStorage on mount
   useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    if (stored) {
+    const hydrate = async () => {
       try {
-        const parsed = JSON.parse(stored) as AppState
-        setState(parsed)
+        if (!USE_DB) {
+          const stored = localStorage.getItem(STORAGE_KEY)
+          if (stored) setState(JSON.parse(stored) as AppState)
+          setIsHydrated(true)
+          return
+        }
+
+        // DB 모드: 기본 뼈대는 유지하고 sites/workers만 서버에서 주입
+        const [sitesRes, workersRes] = await Promise.all([
+          fetch("/api/sites", { method: "GET" }),
+          fetch("/api/workers", { method: "GET" }),
+        ])
+
+        if (!sitesRes.ok || !workersRes.ok) throw new Error("DB fetch failed")
+
+        const sitesJson = await sitesRes.json()
+        const workersJson = await workersRes.json()
+
+        setState((prev) => ({
+          ...prev,
+          sites: sitesJson.sites ?? [],
+          workers: workersJson.workers ?? [],
+          // assignments는 다음 단계에서 DB로 옮김 (지금은 prev 유지)
+        }))
       } catch {
-        // Invalid data, use initial state
+        // 실패하면 기존 mock으로라도 화면이 뜨게 유지
+      } finally {
+        setIsHydrated(true)
       }
     }
-    setIsHydrated(true)
+
+    hydrate()
   }, [])
 
   // Persist to localStorage on change
   useEffect(() => {
-    if (isHydrated) {
+    if (!USE_DB && isHydrated) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
     }
   }, [state, isHydrated])
 
   // Sites
-  const addSite = useCallback((siteData: Omit<Site, "id">) => {
-    const newSite: Site = { ...siteData, id: `s${Date.now()}` }
+  const addSite = useCallback(async (siteData: Omit<Site, "id">) => {
+    const res = await fetch("/api/sites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(siteData),
+    });
+    if (!res.ok) return;
+
+    const { site } = await res.json();
     setState((prev) => ({
       ...prev,
-      sites: [newSite, ...prev.sites],
+      sites: [site, ...prev.sites],
       assignments: [
         {
-          siteId: newSite.id,
+          siteId: site.id,
           waitingWorkerIds: [],
           assignedWorkerIds: [],
           fixedWorkerIds: [],
-          todayRequired: newSite.todayRequired,
+          todayRequired: site.todayRequired ?? 0,
         },
         ...prev.assignments,
       ],
-    }))
-  }, [])
+    }));
+  }, []);
 
-  const updateSite = useCallback((site: Site) => {
+
+
+  const updateSite = useCallback(async (site: Site) => {
+    const res = await fetch(`/api/sites/${site.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: site.name,
+        start_date: (site as any).startDate ?? (site as any).start_date ?? null,
+        end_date: (site as any).endDate ?? (site as any).end_date ?? null,
+        todayRequired: (site as any).todayRequired ?? 0,
+      }),
+    });
+    if (!res.ok) return;
+
+    const { site: updated } = await res.json();
     setState((prev) => ({
       ...prev,
-      sites: prev.sites.map((s) => (s.id === site.id ? site : s)),
-    }))
-  }, [])
+      sites: prev.sites.map((s) => (s.id === updated.id ? updated : s)),
+      assignments: prev.assignments.map((a) =>
+        a.siteId === updated.id ? { ...a, todayRequired: updated.todayRequired ?? 0 } : a
+      ),
+    }));
+  }, []);
 
-  const deleteSite = useCallback((siteId: string) => {
+
+  const deleteSite = useCallback(async (siteId: string) => {
+    const res = await fetch(`/api/sites/${siteId}`, { method: "DELETE" });
+    if (!res.ok) return;
+
     setState((prev) => ({
       ...prev,
       sites: prev.sites.filter((s) => s.id !== siteId),
       assignments: prev.assignments.filter((a) => a.siteId !== siteId),
-    }))
-  }, [])
+    }));
+  }, []);
 
   // Workers
-  const addWorker = useCallback((workerData: Omit<Worker, "id">) => {
-    const newWorker: Worker = { ...workerData, id: `w${Date.now()}` }
+  const addWorker = useCallback(async (workerData: Omit<Worker, "id">) => {
+    const res = await fetch("/api/workers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...workerData,
+        // 필요하면 필드명 맞춰서 전달
+      }),
+    });
+    if (!res.ok) return;
+
+    const { worker } = await res.json();
     setState((prev) => ({
       ...prev,
-      workers: [newWorker, ...prev.workers],
-    }))
-  }, [])
+      workers: [worker, ...prev.workers],
+    }));
+  }, []);
 
-  const updateWorker = useCallback((worker: Worker) => {
+  const updateWorker = useCallback(async (worker: Worker) => {
+    const res = await fetch(`/api/workers/${worker.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: worker.name,
+        phone: (worker as any).phone ?? null,
+        craft: (worker as any).craft ?? null,
+        status: (worker as any).status ?? "미출근",
+        is_fixed: (worker as any).isFixed ?? (worker as any).is_fixed ?? false,
+        assigned_site_id: (worker as any).assignedSiteId ?? (worker as any).assigned_site_id ?? null,
+      }),
+    });
+    if (!res.ok) return;
+
+    const { worker: updated } = await res.json();
     setState((prev) => ({
       ...prev,
-      workers: prev.workers.map((w) => (w.id === worker.id ? worker : w)),
-    }))
-  }, [])
+      workers: prev.workers.map((w) => (w.id === updated.id ? updated : w)),
+    }));
+  }, []);
 
-  const deleteWorker = useCallback((workerId: string) => {
+  const deleteWorker = useCallback(async (workerId: string) => {
+    const res = await fetch(`/api/workers/${workerId}`, { method: "DELETE" });
+    if (!res.ok) return;
+
     setState((prev) => ({
       ...prev,
       workers: prev.workers.filter((w) => w.id !== workerId),
@@ -315,8 +398,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         assignedWorkerIds: a.assignedWorkerIds.filter((id) => id !== workerId),
         fixedWorkerIds: a.fixedWorkerIds.filter((id) => id !== workerId),
       })),
-    }))
-  }, [])
+    }));
+  }, []);
 
   // Assignments
   const updateAssignment = useCallback((assignment: SiteAssignment) => {

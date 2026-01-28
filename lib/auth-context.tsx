@@ -3,57 +3,90 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
 
+type AuthedUser = {
+  id: string
+  officeId: string
+  username: string
+}
+
 interface AuthContextType {
   isAuthenticated: boolean
-  user: { name: string; email: string } | null
+  user: AuthedUser | null
   login: (username: string, password: string) => Promise<boolean>
-  logout: () => void
+  logout: () => Promise<void>
   isLoading: boolean
+  refresh: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [user, setUser] = useState<{ name: string; email: string } | null>(null)
+  const [user, setUser] = useState<AuthedUser | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const router = useRouter()
 
-  useEffect(() => {
-    const stored = localStorage.getItem("desla-auth")
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored)
+  const refresh = async () => {
+    try {
+      const res = await fetch("/api/auth/me", { method: "GET" })
+      const data = await res.json()
+      if (data?.user) {
+        setUser(data.user)
         setIsAuthenticated(true)
-        setUser(parsed.user)
-      } catch {
-        localStorage.removeItem("desla-auth")
+      } else {
+        setUser(null)
+        setIsAuthenticated(false)
       }
+    } catch {
+      setUser(null)
+      setIsAuthenticated(false)
+    } finally {
+      setIsLoading(false)
     }
-    setIsLoading(false)
+  }
+
+  useEffect(() => {
+    refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const login = async (username: string, password: string): Promise<boolean> => {
-    // Mock authentication - accept admin/admin
-    if (username === "admin" && password === "admin") {
-      const userData = { name: "관리자", email: "admin@desla.ai" }
-      localStorage.setItem("desla-auth", JSON.stringify({ user: userData }))
-      setUser(userData)
-      setIsAuthenticated(true)
+    setIsLoading(true)
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      })
+
+      if (!res.ok) {
+        setIsAuthenticated(false)
+        setUser(null)
+        return false
+      }
+
+      // 쿠키가 설정되므로, me로 다시 동기화
+      await refresh()
       return true
+    } finally {
+      setIsLoading(false)
     }
-    return false
   }
 
-  const logout = () => {
-    localStorage.removeItem("desla-auth")
-    setUser(null)
-    setIsAuthenticated(false)
-    router.push("/login")
+  const logout = async () => {
+    setIsLoading(true)
+    try {
+      await fetch("/api/auth/logout", { method: "POST" })
+    } finally {
+      setUser(null)
+      setIsAuthenticated(false)
+      setIsLoading(false)
+      router.push("/login")
+    }
   }
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, user, login, logout, isLoading }}>
+    <AuthContext.Provider value={{ isAuthenticated, user, login, logout, isLoading, refresh }}>
       {children}
     </AuthContext.Provider>
   )
@@ -61,8 +94,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext)
-  if (context === undefined) {
-    throw new Error("useAuth must be used within an AuthProvider")
-  }
+  if (context === undefined) throw new Error("useAuth must be used within an AuthProvider")
   return context
 }

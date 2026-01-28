@@ -41,7 +41,7 @@ export default function SitesPage() {
   return (
     <div className="flex h-screen bg-background">
       <IconRail />
-      <aside className="w-80 shrink-0 border-r border-border bg-card overflow-hidden">
+      <aside className="w-80 lg:w-[400px] shrink-0 border-r border-border bg-card overflow-hidden">
         <SiteListPanel
           sites={state.sites}
           selectedSiteId={state.uiState.selectedSiteId}
@@ -58,12 +58,6 @@ export default function SitesPage() {
             site={selectedSite}
             isOpen={!!state.uiState.selectedSiteId}
             onDeleteSite={handleDeleteSite}
-          />
-          <SitesKpiPanel
-            workersPending={waitingWorkers}
-            siteBillingPending={pendingBillings}
-            supplyPending={pendingPayments}
-            unresolvedIssues={unresolvedIssues}
           />
         </div>
       </div>

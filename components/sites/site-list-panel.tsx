@@ -333,7 +333,7 @@ export function SiteListPanel({
                     className="flex flex-1 flex-col gap-2 text-left min-w-0"
                   >
                     <div className="flex items-start justify-between gap-2 min-w-0">
-                      <span className="font-medium truncate min-w-0">{site.name}</span>
+                      <span className="font-medium min-w-0 whitespace-normal break-words leading-snug">{site.name}</span>
                       <Badge className={cn("shrink-0 text-xs", statusColors[site.status])}>
                         {site.status}
                       </Badge>

@@ -221,84 +221,91 @@ export default function SettlementPage() {
 
         {/* Main Content with Tabs */}
         <div className="flex-1 min-h-0 overflow-hidden">
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full">
-            {/* Left Nav */}
-            <div className="w-52 shrink-0 border-r border-border bg-muted/30 p-4">
-              <TabsList className="flex flex-col h-auto w-full bg-transparent gap-1">
-                <TabsTrigger
-                  value="config"
-                  className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
-                >
-                  <Settings2 className="h-4 w-4" />
-                  정산 설정
-                </TabsTrigger>
-                <TabsTrigger
-                  value="workforce"
-                  className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
-                >
-                  <Users className="h-4 w-4" />
-                  인력별 정산
-                </TabsTrigger>
-                <TabsTrigger
-                  value="team"
-                  className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
-                >
-                  <UserCheck className="h-4 w-4" />
-                  팀 정산
-                </TabsTrigger>
-                <TabsTrigger
-                  value="payout"
-                  className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
-                >
-                  <Wallet className="h-4 w-4" />
-                  지급 관리
-                </TabsTrigger>
-                <TabsTrigger
-                  value="billing"
-                  className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
-                >
-                  <FileText className="h-4 w-4" />
-                  청구/미수금
-                </TabsTrigger>
-              </TabsList>
-            </div>
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full">
+            <div className="flex h-full min-h-0 overflow-hidden">
+              {/* 1) 정산 탭 메뉴: IconRail과 컨텐츠 사이(왼쪽) */}
+              <div className="w-52 shrink-0 border-r border-border bg-muted/30 p-4">
+                <TabsList className="flex h-auto w-full flex-col gap-1 bg-transparent">
+                  <TabsTrigger
+                    value="config"
+                    className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                  >
+                    <Settings2 className="h-4 w-4" />
+                    정산 설정
+                  </TabsTrigger>
 
-            {/* Content Area */}
-            <div className="flex-1 min-h-0 overflow-hidden">
-              <TabsContent value="config" className="h-full m-0 data-[state=inactive]:hidden">
-                <SettlementConfigTab
-                  siteId={selectedSiteId}
-                  siteName={selectedSite?.name || ""}
-                />
-              </TabsContent>
-              <TabsContent value="workforce" className="h-full m-0 data-[state=inactive]:hidden">
-                <WorkforceSettlementTab
-                  siteId={selectedSiteId}
-                  siteName={selectedSite?.name || ""}
-                  period={selectedPeriod}
-                />
-              </TabsContent>
-              <TabsContent value="team" className="h-full m-0 data-[state=inactive]:hidden">
-                <TeamSettlementTab
-                  siteId={selectedSiteId}
-                  siteName={selectedSite?.name || ""}
-                  period={selectedPeriod}
-                />
-              </TabsContent>
-              <TabsContent value="payout" className="h-full m-0 data-[state=inactive]:hidden">
-                <PayoutManagementTab
-                  siteId={selectedSiteId}
-                  siteName={selectedSite?.name || ""}
-                  period={selectedPeriod}
-                />
-              </TabsContent>
-              <TabsContent value="billing" className="h-full m-0 data-[state=inactive]:hidden">
-                <BillingReceivablesTab
-                  siteId={selectedSiteId}
-                  siteName={selectedSite?.name || ""}
-                  period={selectedPeriod}
-                />
-              </TabsContent>
+                  <TabsTrigger
+                    value="workforce"
+                    className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                  >
+                    <Users className="h-4 w-4" />
+                    인력별 정산
+                  </TabsTrigger>
+
+                  <TabsTrigger
+                    value="team"
+                    className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                  >
+                    <UserCheck className="h-4 w-4" />
+                    팀 정산
+                  </TabsTrigger>
+
+                  <TabsTrigger
+                    value="payout"
+                    className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                  >
+                    <Wallet className="h-4 w-4" />
+                    지급 관리
+                  </TabsTrigger>
+
+                  <TabsTrigger
+                    value="billing"
+                    className="w-full justify-start gap-2 px-3 py-2.5 data-[state=active]:bg-background data-[state=active]:shadow-sm"
+                  >
+                    <FileText className="h-4 w-4" />
+                    청구/미수금
+                  </TabsTrigger>
+                </TabsList>
+              </div>
+
+              {/* 2) 컨텐츠 영역 */}
+              <div className="flex-1 min-h-0 overflow-hidden">
+                <TabsContent value="config" className="h-full m-0 data-[state=inactive]:hidden">
+                  <SettlementConfigTab siteId={selectedSiteId} siteName={selectedSite?.name || ""} />
+                </TabsContent>
+
+                <TabsContent value="workforce" className="h-full m-0 data-[state=inactive]:hidden">
+                  <WorkforceSettlementTab
+                    siteId={selectedSiteId}
+                    siteName={selectedSite?.name || ""}
+                    period={selectedPeriod}
+                  />
+                </TabsContent>
+
+                <TabsContent value="team" className="h-full m-0 data-[state=inactive]:hidden">
+                  <TeamSettlementTab
+                    siteId={selectedSiteId}
+                    siteName={selectedSite?.name || ""}
+                    period={selectedPeriod}
+                  />
+                </TabsContent>
+
+                <TabsContent value="payout" className="h-full m-0 data-[state=inactive]:hidden">
+                  <PayoutManagementTab
+                    siteId={selectedSiteId}
+                    siteName={selectedSite?.name || ""}
+                    period={selectedPeriod}
+                  />
+                </TabsContent>
+
+                <TabsContent value="billing" className="h-full m-0 data-[state=inactive]:hidden">
+                  <BillingReceivablesTab
+                    siteId={selectedSiteId}
+                    siteName={selectedSite?.name || ""}
+                    period={selectedPeriod}
+                  />
+                </TabsContent>
+              </div>
             </div>
           </Tabs>
         </div>
@@ -1271,7 +1278,7 @@ function WorkforceSettlementTab({
                     checked={
                       selectedIds.length > 0 &&
                       selectedIds.length ===
-                        filteredSettlements.filter((s) => s.status !== "SETTLED").length
+                      filteredSettlements.filter((s) => s.status !== "SETTLED").length
                     }
                     onCheckedChange={handleSelectAll}
                   />
