@@ -155,6 +155,15 @@ interface PayoutHistory {
   method: string
 }
 
+function kstTodayYmd() {
+  // 브라우저 로컬 타임존이 KST인 환경에서 가장 안전
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const day = String(d.getDate()).padStart(2, "0")
+  return `${y}-${m}-${day}`
+}
+
 function getMonthRange(periodYm: string) {
   // periodYm: "YYYY-MM"
   const [yStr, mStr] = periodYm.split("-")
@@ -176,18 +185,47 @@ export default function SettlementPage() {
     new Date().toISOString().slice(0, 7)
   )
 
+  // ✅ 월말 일괄지급 여부: ON이면 month(1개), OFF면 start/end(2개)
+  const [monthlyPayoutEnabled, setMonthlyPayoutEnabled] = useState<boolean>(true)
+  const [customRange, setCustomRange] = useState<{ start: string; end: string }>(() => {
+    const today = kstTodayYmd()
+    return { start: today, end: today }
+  })
+
+  const computedRange = useMemo(() => {
+    if (monthlyPayoutEnabled) return getMonthRange(selectedPeriod)
+    return { start: customRange.start, end: customRange.end }
+  }, [monthlyPayoutEnabled, selectedPeriod, customRange])
+
+
   const selectedSite = useMemo(
     () => state.sites.find((s) => s.id === selectedSiteId),
     [state.sites, selectedSiteId]
   )
-
-
 
   useEffect(() => {
     if (!selectedSiteId && state.sites.length > 0) {
       setSelectedSiteId(state.sites[0].id)
     }
   }, [selectedSiteId, state.sites])
+
+  useEffect(() => {
+    const loadSitePrefs = async () => {
+      if (!selectedSiteId) return
+      try {
+        const res = await fetch(`/api/sites/prefs?siteId=${encodeURIComponent(selectedSiteId)}`)
+        const json = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(json?.error ?? "설정 로드 실패")
+
+        setMonthlyPayoutEnabled(Boolean(json?.monthlyPayoutEnabled))
+        // 커스텀 기간도 마지막 사용값을 저장할 거면 여기서 함께 로드 가능
+      } catch {
+        // 실패 시 기본 true 유지
+      }
+    }
+    loadSitePrefs()
+  }, [selectedSiteId])
+
 
   return (
     <AppShell title="정산">
@@ -211,13 +249,46 @@ export default function SettlementPage() {
               </Select>
             </div>
             <div className="flex items-center gap-2">
-              <Label className="text-sm text-muted-foreground">기간:</Label>
-              <Input
-                type="month"
-                value={selectedPeriod}
-                onChange={(e) => setSelectedPeriod(e.target.value)}
-                className="w-[160px]"
-              />
+              <Label className="text-sm text-muted-foreground">월말 일괄지급:</Label>
+              <Button
+                size="sm"
+                variant={monthlyPayoutEnabled ? "default" : "outline"}
+                onClick={() => setMonthlyPayoutEnabled((v) => !v)}
+              >
+                {monthlyPayoutEnabled ? "ON" : "OFF"}
+              </Button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2">
+                <Label className="text-sm text-muted-foreground">기간:</Label>
+
+                {monthlyPayoutEnabled ? (
+                  <Input
+                    type="month"
+                    value={selectedPeriod}
+                    onChange={(e) => setSelectedPeriod(e.target.value)}
+                    className="w-[160px]"
+                  />
+                ) : (
+                  <>
+                    <Input
+                      type="date"
+                      value={customRange.start}
+                      onChange={(e) => setCustomRange((p) => ({ ...p, start: e.target.value }))}
+                      className="w-[160px]"
+                    />
+                    <span className="text-muted-foreground">~</span>
+                    <Input
+                      type="date"
+                      value={customRange.end}
+                      onChange={(e) => setCustomRange((p) => ({ ...p, end: e.target.value }))}
+                      className="w-[160px]"
+                    />
+                  </>
+                )}
+              </div>
+
             </div>
             {selectedSite && (
               <Badge
@@ -286,7 +357,7 @@ export default function SettlementPage() {
               {/* 2) 컨텐츠 영역 */}
               <div className="flex-1 min-h-0 overflow-hidden">
                 <TabsContent value="config" className="h-full m-0 data-[state=inactive]:hidden">
-                  <SettlementConfigTab siteId={selectedSiteId} siteName={selectedSite?.name || ""} period={selectedPeriod} />
+                  <SettlementConfigTab siteId={selectedSiteId} siteName={selectedSite?.name || ""} period={selectedPeriod} range={computedRange} />
                 </TabsContent>
 
                 <TabsContent value="workforce" className="h-full m-0 data-[state=inactive]:hidden">
@@ -294,6 +365,7 @@ export default function SettlementPage() {
                     siteId={selectedSiteId}
                     siteName={selectedSite?.name || ""}
                     period={selectedPeriod}
+                    range={computedRange}
                   />
                 </TabsContent>
 
@@ -302,6 +374,7 @@ export default function SettlementPage() {
                     siteId={selectedSiteId}
                     siteName={selectedSite?.name || ""}
                     period={selectedPeriod}
+                    range={computedRange}
                   />
                 </TabsContent>
 
@@ -310,6 +383,7 @@ export default function SettlementPage() {
                     siteId={selectedSiteId}
                     siteName={selectedSite?.name || ""}
                     period={selectedPeriod}
+                    range={computedRange}
                   />
                 </TabsContent>
 
@@ -336,10 +410,12 @@ function SettlementConfigTab({
   siteId,
   siteName,
   period,
+  range,
 }: {
   siteId: string | null
   siteName: string
   period: string
+  range: { start: string; end: string }
 }) {
   const [loading, setLoading] = useState(false)
   const [rules, setRules] = useState<SettlementRule[]>([])
@@ -830,10 +906,12 @@ function WorkforceSettlementTab({
   siteId,
   siteName,
   period,
+  range,
 }: {
   siteId: string | null
   siteName: string
   period: string
+  range: { start: string; end: string }
 }) {
   const [loading, setLoading] = useState(false)
   const [settlements, setSettlements] = useState<SettlementTarget[]>([])
@@ -871,10 +949,12 @@ function WorkforceSettlementTab({
       const { start, end } = getMonthRange(period)
 
       const res = await fetch(
-        `/api/settlements/workforce?siteId=${encodeURIComponent(siteId)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
+        `/api/settlements/workforce?siteId=${encodeURIComponent(siteId)}&start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`
       )
       const json = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(json?.error ?? "정산 로드 실패")
+
+      console.log("[workforce] sample", (json.settlements ?? []).slice(0, 3))
 
       setSettlements(json.settlements ?? [])
     } catch (e: any) {
@@ -923,6 +1003,41 @@ function WorkforceSettlementTab({
       setSelectedIds((prev) => prev.filter((i) => i !== id))
     }
   }
+
+  const selectedTargets = useMemo(() => {
+    return settlements.filter((s) => selectedIds.includes(s.id))
+  }, [settlements, selectedIds])
+
+  const selectedCounts = useMemo(() => {
+    let workers = 0
+    let teams = 0
+    for (const t of selectedTargets) {
+      if (t.mode === "TEAM" || t.type === "team") teams += 1
+      else workers += 1
+    }
+    return { workers, teams }
+  }, [selectedTargets])
+
+  const selectedLabel = useMemo(() => {
+    return `${selectedCounts.workers}명 · ${selectedCounts.teams}팀`
+  }, [selectedCounts])
+
+  const selectedWorkerIds = useMemo(() => {
+    return selectedTargets
+      .filter((t) => !(t.mode === "TEAM" || t.type === "team"))
+      .map((t) => String(t.workerId ?? ""))
+      .filter(Boolean)
+  }, [selectedTargets])
+
+  const selectedTeamLeaderIds = useMemo(() => {
+    return selectedTargets
+      .filter((t) => t.type === "team" || t.mode === "TEAM")
+      .map((t) => String(t.teamId ?? "")) // ✅ 현재 workforce API는 teamId에 leaderId를 넣고 있음
+      .filter(Boolean)
+  }, [selectedTargets])
+
+
+
 
   // Row click to open Sheet
   const handleRowClick = (target: SettlementTarget) => {
@@ -1012,61 +1127,6 @@ function WorkforceSettlementTab({
     }
   }
 
-  const handleCreateAndPayPayout = async () => {
-    if (!siteId) return
-    if (!siteName) {
-      toast.error("siteName이 비어있습니다")
-      return
-    }
-
-    const selectedTargets = settlements.filter((s) => selectedIds.includes(s.id))
-    if (selectedTargets.length === 0) {
-      toast.error("선택된 정산 대상이 없습니다")
-      return
-    }
-
-    setSaving(true)
-    try {
-      const { start, end } = getMonthRange(period)
-
-      // 1) payout 생성 (서버 스펙: siteName, start, end, items)
-      const createRes = await fetch("/api/payouts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          siteId,
-          siteName,
-          start,
-          end,
-          method: "계좌이체",
-          memo: "", // 필요하면 입력 UI 연결
-          items: selectedTargets, // ✅ SettlementTarget[] 그대로 보냄
-        }),
-      })
-
-      const createJson = await createRes.json().catch(() => ({}))
-      if (!createRes.ok) throw new Error(createJson?.error ?? "지급 생성 실패")
-
-      const payoutId = createJson?.payoutId
-      if (!payoutId) throw new Error("payoutId가 응답에 없습니다")
-
-      // 2) payout 지급 완료 처리(단건)
-      const payRes = await fetch(`/api/payouts/${encodeURIComponent(payoutId)}/mark-paid`, {
-        method: "POST",
-      })
-      const payJson = await payRes.json().catch(() => ({}))
-      if (!payRes.ok) throw new Error(payJson?.error ?? "지급 완료 처리 실패")
-
-      toast.success("지급 완료 처리되었습니다")
-      setSelectedIds([])
-    } catch (e: any) {
-      toast.error(e?.message ?? "지급 처리 실패")
-    } finally {
-      setSaving(false)
-    }
-  }
-
-
   // Mark as settled
   const handleMarkSettled = async () => {
     if (!editedTarget) return
@@ -1100,43 +1160,78 @@ function WorkforceSettlementTab({
 
   // Bulk settle selected
   const handleSettleSelected = async () => {
-    await new Promise((r) => setTimeout(r, 500))
-    setSettlements((prev) =>
-      prev.map((s) =>
-        selectedIds.includes(s.id) ? { ...s, status: "SETTLED" as const } : s
-      )
-    )
-    setSelectedIds([])
-    setConfirmDialogOpen(false)
-    toast.success(`${selectedIds.length}명 정산 확정 완료`)
+    if (!siteId) return
+    if (selectedTargets.length === 0) {
+      toast.error("선택된 정산 대상이 없습니다")
+      return
+    }
+
+    setSaving(true)
+    try {
+      const res = await fetch("/api/payout-items/settle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          siteId,
+          periodStart: range.start,
+          periodEnd: range.end,
+          includeTeams: true,
+          workerIds: selectedWorkerIds,
+          teamLeaderIds: selectedTeamLeaderIds,
+        }),
+      })
+
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "정산 확정 실패")
+
+      toast.success(`정산 확정 완료 (${selectedLabel})`)
+      setSelectedIds([])
+      setConfirmDialogOpen(false)
+      await loadSettlements()
+    } catch (e: any) {
+      toast.error(e?.message ?? "정산 확정 실패")
+    } finally {
+      setSaving(false)
+    }
   }
+
+
 
   // Complete scope
   const handleCompleteScope = async () => {
     if (!siteId) return
-    const { start, end } = getMonthRange(period)
 
     setIsCompletingScope(true)
     try {
-      const res = await fetch("/api/settlements/lock", {
+      console.log("[settle] selectedLabel", selectedLabel, { selectedWorkerIds, selectedTeamLeaderIds, range })
+      const res = await fetch("/api/payout-items/settle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ siteId, start, end }),
+        body: JSON.stringify({
+          siteId,
+          periodStart: range.start,
+          periodEnd: range.end,
+          includeTeams: true,
+          ...(selectedIds.length > 0
+            ? { workerIds: selectedWorkerIds, teamLeaderIds: selectedTeamLeaderIds }
+            : {}),
+        }),
       })
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json?.error ?? "정산 락 실패")
 
-      toast.success("해당 범위 정산 확정(락) 완료")
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error ?? "정산완료 생성 실패")
+
+      toast.success(`정산완료 생성: ${json?.created ?? 0}건 (업데이트 ${json?.updated ?? 0}건)`)
       setCompleteScopeDialogOpen(false)
 
-      // 락 후 다시 로드 -> anyLocked 반영되어 status가 SETTLED로 내려옴
       await loadSettlements()
     } catch (e: any) {
-      toast.error(e?.message ?? "정산 완료 처리에 실패했습니다")
+      toast.error(e?.message ?? "정산완료 처리 실패")
     } finally {
       setIsCompletingScope(false)
     }
   }
+
 
   if (!siteId) {
     return (
@@ -1230,32 +1325,17 @@ function WorkforceSettlementTab({
               <RotateCcw className={cn("mr-1.5 h-4 w-4", loading && "animate-spin")} />
               새로고침
             </Button>
-            {selectedIds.length > 0 && (
-              <Button size="sm" onClick={() => setConfirmDialogOpen(true)}>
-                <Check className="mr-1.5 h-4 w-4" />
-                선택 확정 ({selectedIds.length}명)
-              </Button>
-            )}
+
             <Button
               size="sm"
               variant="default"
               onClick={() => setCompleteScopeDialogOpen(true)}
-              disabled={!isAllSettled}
+              disabled={selectedIds.length === 0 || saving}
+              title={selectedIds.length === 0 ? "전체 정산 확정" : "선택 정산 확정"}
             >
               <Lock className="mr-1.5 h-4 w-4" />
-              정산 완료
+              {selectedIds.length > 0 ? `정산 확정 (${selectedLabel})` : "정산 확정"}
             </Button>
-            {selectedIds.length > 0 && (
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={handleCreateAndPayPayout}
-                disabled={saving}
-              >
-                <Wallet className="mr-1.5 h-4 w-4" />
-                선택 지급 처리 ({selectedIds.length}명)
-              </Button>
-            )}
           </div>
         </div>
       </div>
@@ -1519,36 +1599,24 @@ function WorkforceSettlementTab({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Complete Scope Dialog */}
+      {/* Complete Scope Dialog (선택 정산 확정) */}
       <AlertDialog open={completeScopeDialogOpen} onOpenChange={setCompleteScopeDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>전체 정산을 완료할까요?</AlertDialogTitle>
+            <AlertDialogTitle>선택한 대상을 정산 확정할까요?</AlertDialogTitle>
             <AlertDialogDescription>
-              {isAllSettled ? (
-                "해당 현장/기간의 모든 정산이 완료되었습니다. 정산을 최종 확정합니다."
-              ) : (
-                <div className="space-y-2">
-                  <p>아직 정산이 완료되지 않은 대상이 있습니다:</p>
-                  <ul className="list-disc pl-4 text-sm">
-                    {unsettledTargets.slice(0, 5).map((t) => (
-                      <li key={t.id}>{t.name}</li>
-                    ))}
-                    {unsettledTargets.length > 5 && (
-                      <li>외 {unsettledTargets.length - 5}명</li>
-                    )}
-                  </ul>
-                </div>
-              )}
+              선택: {selectedLabel}
+              <br />
+              정산 확정하면 지급 예정(지급 관리)에 누적됩니다.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>취소</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleCompleteScope}
-              disabled={!isAllSettled || isCompletingScope}
+              disabled={selectedIds.length === 0 || isCompletingScope}
             >
-              {isCompletingScope ? "처리 중..." : "정산 완료"}
+              {isCompletingScope ? "처리 중..." : "정산 확정"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1798,10 +1866,12 @@ function TeamSettlementTab({
   siteId,
   siteName,
   period,
+  range,
 }: {
   siteId: string | null
   siteName: string
   period: string
+  range: { start: string; end: string }
 }) {
   if (!siteId) {
     return (
@@ -1837,10 +1907,12 @@ function PayoutManagementTab({
   siteId,
   siteName,
   period,
+  range,
 }: {
   siteId: string | null
   siteName: string
   period: string
+  range: { start: string; end: string }
 }) {
   const [activeSubTab, setActiveSubTab] = useState("pending")
   const [loading, setLoading] = useState(false)
@@ -1868,7 +1940,7 @@ function PayoutManagementTab({
     setLoading(true)
     try {
       const res = await fetch(
-        `/api/payouts?siteId=${encodeURIComponent(siteId)}&period=${encodeURIComponent(period)}`,
+        `/api/payouts?siteId=${encodeURIComponent(siteId)}&start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`,
         { cache: "no-store" }
       )
 
@@ -1929,7 +2001,8 @@ function PayoutManagementTab({
       if (selected.length === 0) throw new Error("선택된 지급 항목이 없습니다")
 
       // 2) period(YYYY-MM) -> start/end(YYYY-MM-DD)
-      const { start, end } = getMonthRange(period)
+      const start = range.start
+      const end = range.end
 
       // 3) payout 생성 payload(items)
       const items = selected.map((p) => ({
@@ -1946,6 +2019,7 @@ function PayoutManagementTab({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           siteId,
+          siteName,             // ✅ 추가
           periodStart: start,
           periodEnd: end,
           method: "계좌이체",
@@ -2089,7 +2163,9 @@ function PayoutManagementTab({
                         <TableCell className="text-right tabular-nums font-medium">
                           {formatKoreanMoney(p.amount)}
                         </TableCell>
-                        <TableCell className="text-muted-foreground">{p.createdAt}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {p.createdAt ? formatKst(p.createdAt) : "-"}
+                        </TableCell>
                       </TableRow>
                     ))}
                 </TableBody>

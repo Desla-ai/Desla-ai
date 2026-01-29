@@ -87,6 +87,25 @@ export async function GET(req: Request) {
 
   if (dsErr) return jsonError(dsErr.message, 500)
 
+  const { data: piRows, error: piErr } = await supabaseAdmin
+    .from("payout_items")
+    .select("payee_type, payee_id, payout_id, status")
+    .eq("office_id", session.officeId)
+    .eq("site_id", siteId)
+    .eq("period_start", start)
+    .eq("period_end", end)
+    .is("payout_id", null)
+    .eq("status", "ACCUMULATED")
+
+  if (piErr) return jsonError(piErr.message, 500)
+
+  const settledWorkerIds = new Set<string>()
+  const settledForemanIds = new Set<string>()
+  for (const r of piRows ?? []) {
+    if (r.payee_type === "WORKER") settledWorkerIds.add(String(r.payee_id))
+    if (r.payee_type === "FOREMAN") settledForemanIds.add(String(r.payee_id))
+  }
+
   // 3) worker 로드(이름/역할)
   const { data: workers, error: wErr } = await supabaseAdmin
     .from("workers")
@@ -98,17 +117,63 @@ export async function GET(req: Request) {
   const workerById = new Map<string, any>()
   for (const w of workers ?? []) workerById.set(w.id, w)
 
-  // 4) worker별 합계/일수 + 기간내 locked 여부
-  const agg = new Map<string, { gross: number; days: number; anyLocked: boolean }>()
+  // 4) ✅ worker별 합계/일수: "금액확정(locked=true)"만 집계
+  // 정책: 확정대기(locked=false)는 정산 대상 제외
+  const agg = new Map<string, { gross: number; days: number }>()
   for (const r of ds ?? []) {
+    if (!r.locked) continue
     const id = r.worker_id as string
-    const prev = agg.get(id) ?? { gross: 0, days: 0, anyLocked: false }
+    const prev = agg.get(id) ?? { gross: 0, days: 0 }
     agg.set(id, {
       gross: prev.gross + (r.daily_wage ?? 0),
       days: prev.days + 1,
-      anyLocked: prev.anyLocked || Boolean(r.locked),
     })
   }
+
+  // 4-1) ✅ 이미 지급완료(PAID)된 payee는 정산 목록에서 제외
+  // 정책: 같은 site + 같은 기간(start/end)에서 payout_items가 PAID면 정산 화면에 남기지 않음
+  // ✅ 이미 지급완료(PAID)된 payee는 정산 목록에서 제외
+  // 핵심: 팀 해체(teams 삭제) 후에도 과거 지급 범위를 유지하려면,
+  //       "현재 팀 구성"이 아니라 "payout_items.member_ids 스냅샷"으로 팀원을 제외해야 함.
+  const { data: paidItems, error: paidErr } = await supabaseAdmin
+    .from("payout_items")
+    .select("payee_type, payee_id, member_ids")
+    .eq("office_id", session.officeId)
+    .eq("site_id", siteId)
+    .eq("period_start", start)
+    .eq("period_end", end)
+    .eq("status", "PAID")
+
+  if (paidErr) return jsonError(paidErr.message, 500)
+
+  const paidWorkerIds = new Set<string>()
+  const paidForemanIds = new Set<string>()
+
+  for (const it of paidItems ?? []) {
+    const payeeType = String((it as any).payee_type ?? "")
+    const payeeId = String((it as any).payee_id ?? "")
+
+    if (payeeType === "WORKER") {
+      if (payeeId) paidWorkerIds.add(payeeId)
+      continue
+    }
+
+    if (payeeType === "FOREMAN") {
+      if (payeeId) paidForemanIds.add(payeeId)
+
+      // ✅ FOREMAN 지급완료면, 그때의 팀원 스냅샷(member_ids)도 같이 지급완료로 간주하여 제외
+      const mids = Array.isArray((it as any).member_ids) ? (it as any).member_ids : []
+      for (const mid of mids) {
+        if (mid) paidWorkerIds.add(String(mid))
+      }
+    }
+  }
+
+  // ✅ 팀 지급이 PAID인 경우(FOREMAN), 리더는 개인(PROXY)로 다시 뜨면 안 됨.
+  // TEAM 타겟은 paidForemanIds로 제외되지만, TEAM 루프를 continue로 건너뛰면 usedInTeam에 leaderId가 안 들어가서
+  // 아래 worker(PROXY) 생성 루프에서 리더가 다시 등장할 수 있다.
+  // 따라서 여기서 미리 “PAID된 FOREMAN 리더”를 usedInTeam에 넣어 개인 타겟 생성을 막는다.
+  const paidLeaderIds = new Set<string>(Array.from(paidForemanIds))
 
   // 5) ✅ DB에서 팀 구성 로드: teams + team_members
   // 정책: 팀은 전체 인력 풀 (teams.site_id NULL 가능), 하지만 site별 팀도 가능
@@ -146,6 +211,7 @@ export async function GET(req: Request) {
     const team = (teamRows ?? []).find((t: any) => t.id === m.team_id)
     const leaderId = team?.leader_worker_id
     if (!leaderId) continue
+
     const arr = leaderToMembers.get(leaderId) ?? []
     if (!arr.includes(m.worker_id)) arr.push(m.worker_id)
     leaderToMembers.set(leaderId, arr)
@@ -156,25 +222,26 @@ export async function GET(req: Request) {
 
   // 6) TEAM 타겟 생성 (반장 + 팀원 합계)
   for (const [leaderId, memberIds] of leaderToMembers.entries()) {
+    // ✅ 지급완료(PAID)된 팀은 정산 화면에서 제외 (옵션 A)
+    if (paidForemanIds.has(String(leaderId))) continue
     // 리더나 팀원이 기간 내 원장(agg)에 하나도 없으면 TEAM 타겟 생성 여부 정책
     // 현재는 "기간에 원장 없으면 스킵"으로 두는 것이 안전.
     const leaderAgg = agg.get(leaderId)
     const memberAggExists = memberIds.some((mid) => agg.has(mid))
     if (!leaderAgg && !memberAggExists) continue
 
-    const leaderA = leaderAgg ?? { gross: 0, days: 0, anyLocked: false }
+    const leaderA = leaderAgg ?? { gross: 0, days: 0 }
     let total = leaderA.gross
     let days = leaderA.days
-    let anyLocked = leaderA.anyLocked
 
     for (const mid of memberIds) {
       const ma = agg.get(mid)
       if (!ma) continue
       total += ma.gross
       days += ma.days
-      anyLocked = anyLocked || ma.anyLocked
       usedInTeam.add(mid)
     }
+
     usedInTeam.add(leaderId)
 
     const leader = workerById.get(leaderId)
@@ -198,13 +265,15 @@ export async function GET(req: Request) {
       foremanPayoutTotal: total,
       memberCount: memberIds.length,
       memberIds,
-      status: anyLocked ? "SETTLED" : "UNSETTLED",
+      status: total > 0 ? (settledForemanIds.has(String(leaderId)) ? "SETTLED" : "READY") : "UNSETTLED",
     })
   }
 
   // 7) 나머지 worker 타겟 생성 (기본 PROXY)
   for (const [workerId, a] of agg.entries()) {
+    if (paidLeaderIds.has(String(workerId))) continue
     if (usedInTeam.has(workerId)) continue
+    if (paidWorkerIds.has(String(workerId))) continue
 
     const w = workerById.get(workerId)
     const name = w?.name ?? "(알수없음)"
@@ -238,7 +307,7 @@ export async function GET(req: Request) {
       foremanPayoutTotal: 0,
       memberCount: 0,
       memberIds: [],
-      status: a.anyLocked ? "SETTLED" : "UNSETTLED",
+      status: a.gross > 0 ? (settledWorkerIds.has(String(workerId)) ? "SETTLED" : "READY") : "UNSETTLED",
     })
   }
 

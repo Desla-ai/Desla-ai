@@ -68,6 +68,8 @@ export async function PUT(req: Request) {
   const date = String(body?.workDate ?? "").trim()
   const dailyWage = Number(body?.dailyWage ?? NaN)
 
+  const locked = body?.locked
+
   if (!siteId) return jsonError("siteId is required", 400)
   if (!workerId) return jsonError("workerId is required", 400)
 
@@ -78,7 +80,13 @@ export async function PUT(req: Request) {
     return jsonError("workDate is out of editable range (last 30 days)", 400)
   }
 
-  if (!Number.isFinite(dailyWage) || dailyWage < 0) {
+  const hasDailyWage = Number.isFinite(dailyWage)
+
+  if (!hasDailyWage && typeof locked !== "boolean") {
+    return jsonError("dailyWage or locked is required", 400)
+  }
+
+  if (hasDailyWage && dailyWage < 0) {
     return jsonError("dailyWage must be a number >= 0", 400)
   }
 
@@ -94,10 +102,12 @@ export async function PUT(req: Request) {
         site_id: siteId,
         worker_id: workerId,
         work_date: workDate,
-        daily_wage: Math.round(dailyWage),
+        ...(Number.isFinite(dailyWage) ? { daily_wage: Math.round(dailyWage) } : {}),
+        ...(typeof locked === "boolean" ? { locked } : {}),
         created_by_user_id: session.userId ?? null,
         updated_at: new Date().toISOString(),
       }],
+
       { onConflict: "office_id,site_id,worker_id,work_date" }
     )
     .select("id, site_id, worker_id, work_date, daily_wage, locked, created_at, updated_at")

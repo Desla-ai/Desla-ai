@@ -162,19 +162,35 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     finalAmount: number
     status: "미정산" | "정산완료"
   }[]>([])
-  const [settlementLocked, setSettlementLocked] = useState(false)
-  const [editingSettlementId, setEditingSettlementId] = useState<string | null>(null)
-  const [editingAmount, setEditingAmount] = useState("")
-  const [savingSettlement, setSavingSettlement] = useState(false)
-  const [lockDialogOpen, setLockDialogOpen] = useState(false)
-  const [lockConfirmText, setLockConfirmText] = useState("")
-  const [isLocking, setIsLocking] = useState(false)
   const [settlementDateRange, setSettlementDateRange] = useState({ start: "", end: "" })
 
   // 당일 정산: 일당 수정(draft) + 저장 상태
   const [dailyWageDraftByWorkerId, setDailyWageDraftByWorkerId] = useState<Record<string, number>>({})
   const [dailyWageSavedByWorkerId, setDailyWageSavedByWorkerId] = useState<Record<string, number>>({})
   const [savingRowId, setSavingRowId] = useState<string | null>(null)
+
+  // ✅ 당일 정산: 자동 저장 상태(행별)
+  const [autoSavingRowIds, setAutoSavingRowIds] = useState<Record<string, boolean>>({})
+  const [autoSaveErrorByWorkerId, setAutoSaveErrorByWorkerId] = useState<Record<string, string>>({})
+
+  // ✅ 금액확정(locked) 상태: workerId -> locked
+  const [dailyLockedByWorkerId, setDailyLockedByWorkerId] = useState<Record<string, boolean>>({})
+
+  // ✅ 선택한 workDate에 daily_settlements 기록이 있는 인력(과거 날짜에서도 표시용)
+  const [recordedWorkerIdsForDate, setRecordedWorkerIdsForDate] = useState<string[]>([])
+
+  // ✅ 확정 해제(Unlock) 모달
+  const [unlockDialogOpen, setUnlockDialogOpen] = useState(false)
+  const [unlockTargetWorkerId, setUnlockTargetWorkerId] = useState<string | null>(null)
+  const [unlockAcknowledge, setUnlockAcknowledge] = useState(false)
+  const [unlockReason, setUnlockReason] = useState("")
+
+  // ✅ 오늘 전체 금액확정 모달
+  const [bulkConfirmDialogOpen, setBulkConfirmDialogOpen] = useState(false)
+  const [bulkConfirmRunning, setBulkConfirmRunning] = useState(false)
+
+  // ✅ 디바운스 타이머(행별)
+  const wageDebounceRef = useMemo(() => new Map<string, any>(), [])
 
   const getTodayLocalStr = () => {
     const d = new Date()
@@ -186,6 +202,8 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
 
   // 당일 정산 날짜: 기본은 오늘, 편집 모드에서만 변경
   const [workDate, setWorkDate] = useState<string>(() => getTodayLocalStr())
+  // ✅ 당일정산 rows 강제 재조회 트리거
+  const [dailyRowsReloadKey, setDailyRowsReloadKey] = useState(0)
   const [isEditDateMode, setIsEditDateMode] = useState(false)
   const [dailyRowsLoading, setDailyRowsLoading] = useState(false)
 
@@ -285,6 +303,30 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
 
   const todayWorkers = [...dailyAssignedWorkers, ...fixedAssignedWorkers]
   const uniqueWorkers = Array.from(new Map(todayWorkers.map(w => [w.id, w])).values())
+
+
+  // ✅ 당일정산 표시용 인력: "현재 배치 인력" + "선택한 날짜에 기록이 있는 인력" 합집합
+  const displayWorkers = useMemo(() => {
+    const currentlyAssigned = [...dailyAssignedWorkers, ...fixedAssignedWorkers]
+    const currentMap = new Map(currentlyAssigned.map((w) => [w.id, w]))
+
+    // 과거 날짜 기록에만 있고 현재 배치에는 없는 인력들
+    const recordedOnly = state.workers.filter((w) => {
+      if (!recordedWorkerIdsForDate.includes(w.id)) return false
+      return !currentMap.has(w.id)
+    })
+
+    // 합치고 중복 제거
+    const merged = [...currentlyAssigned, ...recordedOnly]
+    return Array.from(new Map(merged.map((w) => [w.id, w])).values())
+  }, [
+    dailyAssignedWorkers,
+    fixedAssignedWorkers,
+    recordedWorkerIdsForDate,
+    state.workers,
+  ])
+
+
   const totalDailyWage = uniqueWorkers.reduce((sum, w) => sum + getDailyWage(w.id), 0)
 
 
@@ -311,7 +353,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
   useEffect(() => {
     const loadDailyRows = async () => {
       if (!site?.id) return
-      if (!isWithinLastNDays(workDate,30)) return
+      if (!isWithinLastNDays(workDate, 30)) return
 
       setDailyRowsLoading(true)
       try {
@@ -320,13 +362,23 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
         if (!res.ok) throw new Error(json?.error ?? "당일 정산 로드 실패")
 
         const rows = json.rows ?? []
-        const map: Record<string, number> = {}
+        const wageMap: Record<string, number> = {}
+        const lockedMap: Record<string, boolean> = {}
+
         for (const r of rows) {
-          map[r.worker_id] = r.daily_wage
+          wageMap[r.worker_id] = r.daily_wage
+          lockedMap[r.worker_id] = Boolean(r.locked)
         }
-        setDailyWageSavedByWorkerId(map)
+
+        setDailyWageSavedByWorkerId(wageMap)
+        setDailyLockedByWorkerId(lockedMap)
+        setRecordedWorkerIdsForDate(
+          Array.from(new Set((rows ?? []).map((r: any) => String(r.worker_id))))
+        )
+
         // draft는 날짜 바뀌면 초기화(편집 UX 안전)
         setDailyWageDraftByWorkerId({})
+        setAutoSaveErrorByWorkerId({})
       } catch (e: any) {
         toast.error(e?.message ?? "당일 정산을 불러오지 못했습니다")
         setDailyWageSavedByWorkerId({})
@@ -336,7 +388,8 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     }
 
     loadDailyRows()
-  }, [site?.id, workDate])
+  }, [site?.id, workDate, dailyRowsReloadKey])
+
 
 
   const handleStatusChange = (newStatus: SiteStatusType) => {
@@ -663,7 +716,6 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
       const body = await res.json()
       setSettlementData(body.items ?? [])
       setSettlementDateRange({ start, end })
-      setSettlementLocked(site.status === "정산완료")
     } catch (e: any) {
       setSettlementError(e?.message ?? "누적 정산을 불러오지 못했습니다")
     } finally {
@@ -671,99 +723,12 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     }
   }
 
-
-
-  // Handle amount edit
-  const handleStartEditAmount = (settlementId: string, currentAmount: number) => {
-    if (settlementLocked) return
-    setEditingSettlementId(settlementId)
-    setEditingAmount(String(currentAmount))
-  }
-
-  const handleSaveAmount = async () => {
-    if (!editingSettlementId) return
-    const value = Number.parseInt(editingAmount, 10)
-    if (Number.isNaN(value) || value < 0) {
-      toast.error("올바른 금액을 입력해주세요 (0 이상)")
-      return
-    }
-
-    setSavingSettlement(true)
-    try {
-      // API stub: PATCH /api/sites/:siteId/settlements/workforce
-      await new Promise((resolve) => setTimeout(resolve, 500))
-
-      setSettlementData((prev) =>
-        prev.map((s) =>
-          s.id === editingSettlementId
-            ? { ...s, adjustment: value - s.calculatedAmount, finalAmount: value }
-            : s
-        )
-      )
-      toast.success("금액이 수정되었습니다.")
-    } catch {
-      toast.error("금액 수정에 실패했습니다.")
-    } finally {
-      setSavingSettlement(false)
-      setEditingSettlementId(null)
-      setEditingAmount("")
-    }
-  }
-
-  const handleCancelEdit = () => {
-    setEditingSettlementId(null)
-    setEditingAmount("")
-  }
-
-  // Handle lock/finalize
-  const handleLockSettlement = async () => {
-    if (lockConfirmText !== "LOCK" && lockConfirmText !== site?.name) {
-      toast.error("'LOCK' 또는 현장명을 정확히 입력해주세요.")
-      return
-    }
-
-    setIsLocking(true)
-    try {
-      const start = settlementDateRange.start || site?.startDate
-      const end = settlementDateRange.end || new Date().toISOString().split("T")[0]
-
-      const res = await fetch("/api/settlements/lock", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ siteId: site?.id, start, end }),
-      })
-
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json?.error ?? "정산 확정에 실패했습니다.")
-
-      // 1) UI 잠금
-      setSettlementLocked(true)
-
-      // 2) 서버 기준으로 다시 로드(locked 반영된 상태로 rows.status가 바뀜)
-      await loadSettlementData()
-
-      // 3) site 상태도 정산완료로(이건 기존 UX 유지)
-      if (site) updateSite({ ...site, status: "정산완료" })
-
-      toast.success("정산이 확정되었습니다.")
-      setLockDialogOpen(false)
-      setLockConfirmText("")
-    } catch (e: any) {
-      toast.error(e?.message ?? "정산 확정에 실패했습니다.")
-    } finally {
-      setIsLocking(false)
-    }
-  }
-
-
-  // Load settlement when switching to that tab
   useEffect(() => {
-    if (activeTab === "정산" && site) {
+    if (activeTab === "누적정산" && site) {
       loadSettlementData()
     }
-  }, [activeTab, site])
-
-
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, site?.id])
 
   if (!isOpen || !site) {
     return (
@@ -1172,7 +1137,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                         value={workDate}
                         onChange={(e) => {
                           const next = e.target.value
-                          if (!isWithinLastNDays(next,30)) {
+                          if (!isWithinLastNDays(next, 30)) {
                             toast.error("최근 30일 이내만 수정할 수 있습니다.")
                             return
                           }
@@ -1218,20 +1183,36 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                   )}
                 </div>
                 <Badge variant="secondary">
-                  {dailyAssignedWorkers.length + fixedAssignedWorkers.length}명
+                  {displayWorkers.length}명
                 </Badge>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="bg-transparent"
-              >
-                <RotateCcw className="mr-1.5 h-4 w-4" />
-                새로고침
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => setBulkConfirmDialogOpen(true)}
+                  disabled={bulkConfirmRunning || dailyRowsLoading || displayWorkers.length === 0}
+                >
+                  <Lock className="mr-1.5 h-4 w-4" />
+                  오늘 전체 금액확정
+                </Button>
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="bg-transparent"
+                  onClick={() => {
+                    setDailyRowsReloadKey((k) => k + 1)
+                    toast.message("새로고침")
+                  }}
+
+                >
+                  <RotateCcw className="mr-1.5 h-4 w-4" />
+                  새로고침
+                </Button>
+              </div>
             </div>
             <div className="flex-1 min-h-0 overflow-auto">
-              {(dailyAssignedWorkers.length + fixedAssignedWorkers.length) === 0 ? (
+              {displayWorkers.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full text-center">
                   <Receipt className="mb-3 h-10 w-10 text-muted-foreground/50" />
                   <h3 className="mb-1 font-semibold">오늘 출근한 인력이 없습니다</h3>
@@ -1247,20 +1228,31 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                       <TableHead className="min-w-[80px]">역할</TableHead>
                       <TableHead className="min-w-[80px]">배치 유형</TableHead>
                       <TableHead className="min-w-[100px] text-right">일당</TableHead>
-                      <TableHead className="w-[90px] text-right">저장</TableHead>
+                      <TableHead className="w-[120px] text-right">금액확정</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {[...dailyAssignedWorkers, ...fixedAssignedWorkers].map((worker) => (
+                    {displayWorkers.map((worker) => (
                       <TableRow key={worker.id}>
                         <TableCell className="font-medium">{worker.name}</TableCell>
                         <TableCell>
                           <Badge variant="outline">{worker.roles[0]?.name || "일반"}</Badge>
                         </TableCell>
                         <TableCell>
-                          <Badge variant={dailyAssignedWorkers.some(w => w.id === worker.id) ? "secondary" : "default"}>
-                            {dailyAssignedWorkers.some(w => w.id === worker.id) ? "당일" : "고정"}
-                          </Badge>
+                          {(() => {
+                            const isDaily = dailyAssignedWorkers.some((w) => w.id === worker.id)
+                            const isFixed = fixedAssignedWorkers.some((w) => w.id === worker.id)
+                            const isRecordedOnly =
+                              recordedWorkerIdsForDate.includes(worker.id) && !isDaily && !isFixed
+
+                            const label = isDaily ? "당일" : isFixed ? "고정" : isRecordedOnly ? "기록" : "기타"
+
+                            return (
+                              <Badge variant={isRecordedOnly ? "outline" : isDaily ? "secondary" : "default"}>
+                                {label}
+                              </Badge>
+                            )
+                          })()}
                         </TableCell>
                         <TableCell className="text-right">
                           <Input
@@ -1268,23 +1260,120 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                             inputMode="numeric"
                             className="h-8 w-[120px] text-right"
                             value={getDailyWage(worker.id)}
+                            disabled={Boolean(dailyLockedByWorkerId[worker.id])}
                             onChange={(e) => {
+                              // ✅ 확정(locked) 상태면 수정/자동저장 절대 금지 (안전장치)
+                              if (dailyLockedByWorkerId[worker.id]) return
+
                               const next = Number(e.target.value || 0)
+
                               setDailyWageDraftByWorkerId((prev) => ({ ...prev, [worker.id]: next }))
+
+                              // 디바운스 자동 저장
+                              const prevTimer = wageDebounceRef.get(worker.id)
+                              if (prevTimer) clearTimeout(prevTimer)
+
+                              const t = setTimeout(async () => {
+                                try {
+                                  setAutoSavingRowIds((p) => ({ ...p, [worker.id]: true }))
+                                  setAutoSaveErrorByWorkerId((p) => {
+                                    const n = { ...p }
+                                    delete n[worker.id]
+                                    return n
+                                  })
+
+                                  const res = await fetch("/api/daily-settlements", {
+                                    method: "PUT",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({
+                                      siteId: site?.id,
+                                      workerId: worker.id,
+                                      workDate,
+                                      dailyWage: next,
+                                    }),
+                                  })
+                                  const json = await res.json().catch(() => ({}))
+                                  if (!res.ok) throw new Error(json?.error ?? "자동 저장 실패")
+
+                                  setDailyWageSavedByWorkerId((prev) => ({ ...prev, [worker.id]: next }))
+                                  setDailyWageDraftByWorkerId((prev) => {
+                                    const n = { ...prev }
+                                    delete n[worker.id]
+                                    return n
+                                  })
+                                } catch (err: any) {
+                                  setAutoSaveErrorByWorkerId((p) => ({ ...p, [worker.id]: err?.message ?? "자동 저장 실패" }))
+                                } finally {
+                                  setAutoSavingRowIds((p) => ({ ...p, [worker.id]: false }))
+                                }
+                              }, 450)
+
+                              wageDebounceRef.set(worker.id, t)
                             }}
                           />
+
+                          {/* 작은 상태표시(저장중/실패) */}
+                          <div className="mt-1 flex justify-end">
+                            {autoSavingRowIds[worker.id] ? (
+                              <span className="text-[10px] text-muted-foreground">저장중…</span>
+                            ) : autoSaveErrorByWorkerId[worker.id] ? (
+                              <span className="text-[10px] text-destructive">저장 실패</span>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground">&nbsp;</span>
+                            )}
+                          </div>
                         </TableCell>
 
                         <TableCell className="text-right">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-8 bg-transparent"
-                            disabled={savingRowId === worker.id}
-                            onClick={() => handleSaveDailyWageRow(worker.id)}
-                          >
-                            {savingRowId === worker.id ? "저장중" : "저장"}
-                          </Button>
+                          {dailyLockedByWorkerId[worker.id] ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-8 bg-transparent"
+                              onClick={() => {
+                                setUnlockTargetWorkerId(worker.id)
+                                setUnlockAcknowledge(false)
+                                setUnlockReason("")
+                                setUnlockDialogOpen(true)
+                              }}
+                            >
+                              확정 해제
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              className="h-8"
+                              disabled={autoSavingRowIds[worker.id]}
+                              onClick={async () => {
+                                const wage = getDailyWage(worker.id)
+                                try {
+                                  setSavingRowId(worker.id)
+                                  const res = await fetch("/api/daily-settlements", {
+                                    method: "PUT",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({
+                                      siteId: site?.id,
+                                      workerId: worker.id,
+                                      workDate,
+                                      dailyWage: wage,
+                                      locked: true,
+                                    }),
+                                  })
+                                  const json = await res.json().catch(() => ({}))
+                                  if (!res.ok) throw new Error(json?.error ?? "금액확정 실패")
+
+                                  setDailyLockedByWorkerId((p) => ({ ...p, [worker.id]: true }))
+                                  toast.success("금액확정 완료")
+                                } catch (e: any) {
+                                  toast.error(e?.message ?? "금액확정 실패")
+                                } finally {
+                                  setSavingRowId(null)
+                                }
+                              }}
+                            >
+                              {savingRowId === worker.id ? "처리중…" : "금액확정"}
+                            </Button>
+                          )}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -1292,7 +1381,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                 </Table>
               )}
             </div>
-            {(dailyAssignedWorkers.length + fixedAssignedWorkers.length) > 0 && (
+            {displayWorkers.length > 0 && (
               <div className="shrink-0 border-t border-border bg-muted/30 px-4 py-3">
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-muted-foreground">
@@ -1322,7 +1411,6 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                       setSettlementDateRange((prev) => ({ ...prev, start: e.target.value }))
                     }
                     className="h-8 w-32"
-                    disabled={settlementLocked}
                   />
                   <span className="text-muted-foreground">~</span>
                   <Input
@@ -1332,15 +1420,8 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                       setSettlementDateRange((prev) => ({ ...prev, end: e.target.value }))
                     }
                     className="h-8 w-32"
-                    disabled={settlementLocked}
                   />
                 </div>
-                {settlementLocked && (
-                  <Badge className="bg-status-pending text-status-pending-foreground gap-1">
-                    <Lock className="h-3 w-3" />
-                    확정됨
-                  </Badge>
-                )}
               </div>
               <div className="flex items-center gap-2">
                 <Button
@@ -1357,18 +1438,6 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                   )}
                   새로고침
                 </Button>
-                {!settlementLocked && settlementData.length > 0 && (
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setLockConfirmText("")
-                      setLockDialogOpen(true)
-                    }}
-                  >
-                    <Lock className="mr-1.5 h-4 w-4" />
-                    정산 확정 (락)
-                  </Button>
-                )}
               </div>
             </div>
 
@@ -1438,80 +1507,19 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                         <TableCell className="text-right tabular-nums">
                           {formatKoreanMoney(row.calculatedAmount)}
                         </TableCell>
-                        <TableCell className="text-right">
-                          {editingSettlementId === row.id ? (
-                            <div className="flex items-center gap-1 justify-end">
-                              <Input
-                                type="number"
-                                value={editingAmount}
-                                onChange={(e) => setEditingAmount(e.target.value)}
-                                className="h-8 w-24 text-right"
-                                min={0}
-                                autoFocus
-                              />
-                              <Button
-                                size="icon"
-                                variant="ghost"
-                                className="h-8 w-8"
-                                onClick={handleSaveAmount}
-                                disabled={savingSettlement}
-                              >
-                                {savingSettlement ? (
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : (
-                                  <Check className="h-4 w-4" />
-                                )}
-                              </Button>
-                              <Button
-                                size="icon"
-                                variant="ghost"
-                                className="h-8 w-8"
-                                onClick={handleCancelEdit}
-                              >
-                                <X className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleStartEditAmount(row.id, row.finalAmount)}
-                              disabled={settlementLocked}
-                              className={cn(
-                                "inline-flex items-center gap-1 tabular-nums font-semibold",
-                                !settlementLocked && "hover:text-primary cursor-pointer",
-                                settlementLocked && "cursor-not-allowed"
-                              )}
-                            >
-                              {formatKoreanMoney(row.finalAmount)}
-                              {!settlementLocked && (
-                                <Edit2 className="h-3 w-3 text-muted-foreground" />
-                              )}
-                              {row.adjustment !== 0 && (
-                                <span
-                                  className={cn(
-                                    "text-xs ml-1",
-                                    row.adjustment > 0
-                                      ? "text-green-600"
-                                      : "text-destructive"
-                                  )}
-                                >
-                                  ({row.adjustment > 0 ? "+" : ""}
-                                  {formatKoreanMoney(row.adjustment)})
-                                </span>
-                              )}
-                            </button>
-                          )}
+                        <TableCell className="text-right font-semibold">
+                          {formatKoreanMoney(row.finalAmount)}
                         </TableCell>
                         <TableCell>
-                          <Badge
-                            className={cn(
-                              row.status === "정산완료"
+                          {(() => {
+                            const viewStatus = row.status === "정산완료" ? "금액확정" : "확정대기"
+                            const cls =
+                              viewStatus === "금액확정"
                                 ? "bg-status-progress text-status-progress-foreground"
                                 : "bg-muted text-muted-foreground"
-                            )}
-                          >
-                            {row.status}
-                          </Badge>
+
+                            return <Badge className={cls}>{viewStatus}</Badge>
+                          })()}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -1776,46 +1784,159 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Settlement Lock Confirmation Dialog */}
-      <AlertDialog open={lockDialogOpen} onOpenChange={setLockDialogOpen}>
+      {/* ✅ Unlock Confirmation Dialog (확정 해제) */}
+      <Dialog open={unlockDialogOpen} onOpenChange={setUnlockDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>금액확정을 해제할까요?</DialogTitle>
+            <DialogDescription>
+              해제하면 정산/지급 금액에 영향이 있을 수 있습니다.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 py-2">
+            <div className="flex items-start gap-2">
+              <Checkbox
+                checked={unlockAcknowledge}
+                onCheckedChange={(v) => setUnlockAcknowledge(Boolean(v))}
+                id="unlock-ack"
+              />
+              <Label htmlFor="unlock-ack" className="text-sm leading-5">
+                정산/지급에 영향이 있을 수 있음을 이해했습니다.
+              </Label>
+            </div>
+
+            <div className="space-y-1">
+              <Label className="text-sm">해제 사유 (선택)</Label>
+              <Input
+                value={unlockReason}
+                onChange={(e) => setUnlockReason(e.target.value)}
+                placeholder="선택 입력"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setUnlockDialogOpen(false)} className="bg-transparent">
+              취소
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!unlockAcknowledge || !unlockTargetWorkerId}
+              onClick={async () => {
+                const workerId = unlockTargetWorkerId
+                if (!workerId) return
+                try {
+                  setSavingRowId(workerId)
+                  const res = await fetch("/api/daily-settlements", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      siteId: site?.id,
+                      workerId,
+                      workDate,
+                      locked: false,
+                      // P0에서는 사유는 서버에 아직 안 넣어도 됨(나중에 record_events로 확장)
+                      // reason: unlockReason,
+                    }),
+                  })
+                  const json = await res.json().catch(() => ({}))
+                  if (!res.ok) throw new Error(json?.error ?? "해제 실패")
+
+                  setDailyLockedByWorkerId((p) => ({ ...p, [workerId]: false }))
+                  toast.success("확정 해제 완료 (배차완료로 복귀)")
+                  setUnlockDialogOpen(false)
+                } catch (e: any) {
+                  toast.error(e?.message ?? "해제 실패")
+                } finally {
+                  setSavingRowId(null)
+                  setUnlockTargetWorkerId(null)
+                }
+              }}
+            >
+              확정 해제
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ✅ Bulk Confirm Dialog (오늘 전체 금액확정) */}
+      <AlertDialog open={bulkConfirmDialogOpen} onOpenChange={setBulkConfirmDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2">
-              <Lock className="h-5 w-5 text-primary" />
-              정산을 확정할까요?
-            </AlertDialogTitle>
-            <AlertDialogDescription className="space-y-3">
-              <p>
-                <strong>{site?.name}</strong> 현장의 인력별 정산을 확정합니다.
-              </p>
-              <p className="text-destructive font-medium">
-                확정 후에는 금액을 수정할 수 없습니다.
-              </p>
-              <div className="pt-2">
-                <Label htmlFor="lock-confirm">
-                  확인을 위해 'LOCK' 또는 현장명을 입력하세요
-                </Label>
-                <Input
-                  id="lock-confirm"
-                  value={lockConfirmText}
-                  onChange={(e) => setLockConfirmText(e.target.value)}
-                  placeholder="LOCK"
-                  className="mt-2"
-                />
+            <AlertDialogTitle>오늘 전체 금액확정을 진행할까요?</AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2">
+              <div>현장: <strong>{site?.name}</strong></div>
+              <div>날짜: <strong>{workDate}</strong></div>
+              <div className="text-destructive">
+                배차된 인력 중 아직 확정되지 않은 항목을 금액확정 처리합니다.
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isLocking}>취소</AlertDialogCancel>
+            <AlertDialogCancel disabled={bulkConfirmRunning}>취소</AlertDialogCancel>
             <AlertDialogAction
-              onClick={handleLockSettlement}
-              disabled={isLocking || !lockConfirmText}
+              disabled={bulkConfirmRunning}
+              onClick={async () => {
+                const unique = Array.from(new Map(displayWorkers.map(w => [w.id, w])).values())
+
+                // 대상: 미확정(locked=false)만
+                const targets = unique.filter(w => !dailyLockedByWorkerId[w.id])
+
+                if (targets.length === 0) {
+                  toast.message("확정할 인력이 없습니다.")
+                  setBulkConfirmDialogOpen(false)
+                  return
+                }
+
+                setBulkConfirmRunning(true)
+
+                let ok = 0
+                const failed: { name: string; reason: string }[] = []
+
+                // A 방식: 실패 스킵, 계속 진행
+                for (const w of targets) {
+                  try {
+                    const wage = getDailyWage(w.id)
+                    const res = await fetch("/api/daily-settlements", {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        siteId: site?.id,
+                        workerId: w.id,
+                        workDate,
+                        dailyWage: wage,
+                        locked: true,
+                      }),
+                    })
+                    const json = await res.json().catch(() => ({}))
+                    if (!res.ok) throw new Error(json?.error ?? "확정 실패")
+
+                    ok += 1
+                    setDailyLockedByWorkerId((p) => ({ ...p, [w.id]: true }))
+                  } catch (e: any) {
+                    failed.push({ name: w.name, reason: e?.message ?? "확정 실패" })
+                  }
+                }
+
+                setBulkConfirmRunning(false)
+                setBulkConfirmDialogOpen(false)
+
+                if (failed.length === 0) {
+                  toast.success(`전체 금액확정 완료 (성공 ${ok}건)`)
+                } else {
+                  toast.warning(`전체 금액확정 완료: 성공 ${ok}건 / 실패 ${failed.length}건`)
+                  // 실패 상세는 다음 단계에서 Sheet/Toast 확장 가능
+                  console.warn("Bulk confirm failed:", failed)
+                }
+              }}
             >
-              {isLocking ? "확정 중..." : "정산 확정"}
+              {bulkConfirmRunning ? "처리 중..." : "전체 확정"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
 
       {/* Worker Detail Sheet */}
       <Sheet open={workerSheetOpen} onOpenChange={setWorkerSheetOpen}>
