@@ -189,6 +189,9 @@ interface AppStoreContextType {
   deleteSnapshot: (snapshotId: string) => Promise<void>
   // Role
   addRole: (role: { name: string; color: string }) => Promise<any>
+  refreshWorkers: () => Promise<void>
+  updateWorkerPatch: (id: string, patch: Partial<Omit<Worker, "id">>) => Promise<void>
+
 }
 
 const AppStoreContext = createContext<AppStoreContextType | undefined>(undefined)
@@ -258,6 +261,35 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
     }
   }, [state, isHydrated])
+
+  const refreshWorkers = useCallback(async () => {
+    const res = await fetch("/api/workers", { method: "GET", cache: "no-store" })
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(json?.error ?? "workers refresh failed")
+
+    setState((prev) => ({
+      ...prev,
+      workers: json.workers ?? [],
+    }))
+  }, [])
+
+  type WorkerPatch = Partial<Omit<Worker, "id">>
+
+  const updateWorkerPatch = useCallback(async (id: string, patch: WorkerPatch) => {
+    const res = await fetch(`/api/workers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    })
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(json?.error ?? "worker patch failed")
+
+    const updated = json.worker as Worker
+    setState((prev) => ({
+      ...prev,
+      workers: prev.workers.map((w) => (w.id === updated.id ? updated : w)),
+    }))
+  }, [])
 
   // Sites
   const addSite = useCallback(async (siteData: Omit<Site, "id">) => {
@@ -590,6 +622,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         getSnapshots,
         deleteSnapshot,
         addRole,
+        refreshWorkers,
+        updateWorkerPatch,
       }}
     >
       {children}

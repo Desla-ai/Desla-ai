@@ -14,21 +14,98 @@ const WORKER_SELECT_WITH_ROLES = `
   )
 `
 
+import { getSession } from "@/lib/server/session"
+
+function jsonError(message: string, status = 400) {
+  return NextResponse.json({ error: message }, { status })
+}
+
 export async function GET() {
-  const cookieStore = await cookies()
-  const session = verifySessionCookie(cookieStore.get(SESSION_COOKIE_NAME)?.value)
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  try {
+    const session = await getSession()
+    if (!session) return jsonError("Unauthorized", 401)
 
-  const { data, error } = await supabaseAdmin
-    .from("workers")
-    .select(WORKER_SELECT_WITH_ROLES)
-    .eq("office_id", session.officeId)
-    .order("created_at", { ascending: false })
+    // 1) workers 기본 조회
+    const { data, error } = await supabaseAdmin
+      .from("workers")
+      .select(WORKER_SELECT_WITH_ROLES)
+      .eq("office_id", session.officeId)
+      .order("created_at", { ascending: true })
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    if (error) return jsonError(error.message ?? "Failed to fetch workers", 500)
 
-  const workers = (data ?? []).map(toWorkerDTO)
-  return NextResponse.json({ workers })
+    const workers = (data ?? []).map(toWorkerDTO)
+
+    // 2) teams + team_members 로드(office 범위)
+    const { data: teams, error: teamsErr } = await supabaseAdmin
+      .from("teams")
+      .select("id, leader_worker_id")
+      .eq("office_id", session.officeId)
+
+    if (teamsErr) return jsonError(teamsErr.message ?? "Failed to fetch teams", 500)
+
+    const teamIds = (teams ?? []).map((t) => t.id)
+    const leaderByTeamId = new Map<string, string>()
+    const teamIdByLeader = new Map<string, string>()
+    for (const t of teams ?? []) {
+      if (t.id && t.leader_worker_id) {
+        leaderByTeamId.set(t.id, t.leader_worker_id)
+        teamIdByLeader.set(t.leader_worker_id, t.id)
+      }
+    }
+
+    let members: Array<{ team_id: string; worker_id: string }> = []
+    if (teamIds.length > 0) {
+      const { data: tm, error: tmErr } = await supabaseAdmin
+        .from("team_members")
+        .select("team_id, worker_id")
+        .in("team_id", teamIds)
+
+      if (tmErr) return jsonError(tmErr.message ?? "Failed to fetch team members", 500)
+      members = (tm ?? []) as any
+    }
+
+    const membersByLeader = new Map<string, string[]>()
+    const leaderByMember = new Map<string, string>()
+
+    for (const m of members) {
+      const leaderId = leaderByTeamId.get(m.team_id)
+      if (!leaderId) continue
+      leaderByMember.set(m.worker_id, leaderId)
+      const arr = membersByLeader.get(leaderId) ?? []
+      arr.push(m.worker_id)
+      membersByLeader.set(leaderId, arr)
+    }
+
+    // 3) DTO overwrite: "반장 혼자"도 leader로 표시되게 teamIdByLeader를 기준으로 판단
+    const enriched = workers.map((w) => {
+      const isLeader = teamIdByLeader.has(w.id)
+      if (isLeader) {
+        return {
+          ...w,
+          team: "반장" as const,
+          teamLeaderId: undefined,
+          teamMembers: membersByLeader.get(w.id) ?? [],
+        }
+      }
+
+      const leaderId = leaderByMember.get(w.id)
+      if (leaderId) {
+        return {
+          ...w,
+          team: "팀원" as const,
+          teamLeaderId: leaderId,
+          teamMembers: undefined,
+        }
+      }
+
+      return { ...w, team: null, teamLeaderId: undefined, teamMembers: undefined }
+    })
+
+    return NextResponse.json({ workers: enriched })
+  } catch (e: any) {
+    return jsonError(e?.message ?? "Internal Server Error", 500)
+  }
 }
 
 export async function POST(req: Request) {

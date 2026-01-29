@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { cookies } from "next/headers"
 
 const COOKIE_NAME = "desla_session";
 
@@ -38,6 +39,12 @@ export function verifySessionCookie(cookieValue: string | undefined): SessionPay
   const payload = JSON.parse(json) as SessionPayload;
   if (!payload?.exp || payload.exp < Math.floor(Date.now() / 1000)) return null;
   return payload;
+}
+
+export async function getSession() {
+  const cookieStore = await cookies()
+  const cookieValue = cookieStore.get(SESSION_COOKIE_NAME)?.value
+  return verifySessionCookie(cookieValue)
 }
 
 export const SESSION_COOKIE_NAME = COOKIE_NAME;

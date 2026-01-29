@@ -89,8 +89,12 @@ export default function WorkersPage() {
     })
   }, [state.workers, search, statusFilter, roleFilter, teamFilter])
 
-  const handleWorkerUpdate = (updatedWorker: Worker) => {
+  const handleWorkerUpdate = (updatedWorker: Worker, opts?: { keepSelection?: boolean }) => {
     updateWorker(updatedWorker)
+
+    // ✅ 팀원 추가/삭제 같은 "배경 업데이트"는 선택 유지
+    if (opts?.keepSelection) return
+
     setSelectedWorker(updatedWorker)
   }
 
