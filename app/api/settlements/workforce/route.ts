@@ -43,6 +43,7 @@ export async function GET(req: Request) {
   const cookieStore = await cookies()
   const session = verifySessionCookie(cookieStore.get(SESSION_COOKIE_NAME)?.value)
   if (!session) return jsonError("Unauthorized", 401)
+  const s = session
 
   const url = new URL(req.url)
   const siteId = String(url.searchParams.get("siteId") ?? "").trim()
@@ -55,11 +56,44 @@ export async function GET(req: Request) {
 
   const ym = ymdToYm(start)
 
-  // 1) rules 로드
+  // 0) get-or-create batch (DRAFT if none)
+  const { data: existingBatch, error: bFindErr } = await supabaseAdmin
+    .from("settlement_batches")
+    .select("id, status")
+    .eq("office_id", s.officeId)
+    .eq("site_id", siteId)
+    .eq("period_start", start)
+    .eq("period_end", end)
+    .maybeSingle()
+
+  if (bFindErr) return jsonError(bFindErr.message, 500)
+
+  let batchId = existingBatch?.id as string | undefined
+  if (!batchId) {
+    const { data: createdBatch, error: bInsErr } = await supabaseAdmin
+      .from("settlement_batches")
+      .insert([
+        {
+          office_id: s.officeId,
+          site_id: siteId,
+          period_start: start,
+          period_end: end,
+          status: "DRAFT",
+          created_by_user_id: s.userId,
+        },
+      ])
+      .select("id, status")
+      .single()
+
+    if (bInsErr) return jsonError(bInsErr.message, 500)
+    batchId = createdBatch.id
+  }
+
+  // 1) rules
   const { data: ruleRows, error: ruleErr } = await supabaseAdmin
     .from("settlement_rules")
     .select("id, site_id, type, target_id, target_name, commission_type, commission_value, effective_start, effective_end")
-    .eq("office_id", session.officeId)
+    .eq("office_id", s.officeId)
     .eq("site_id", siteId)
 
   if (ruleErr) return jsonError(ruleErr.message, 500)
@@ -76,24 +110,23 @@ export async function GET(req: Request) {
     effectiveEnd: r.effective_end,
   }))
 
-  // 2) 원장 로드
+  // 2) daily_settlements
   const { data: ds, error: dsErr } = await supabaseAdmin
     .from("daily_settlements")
     .select("worker_id, work_date, daily_wage, locked")
-    .eq("office_id", session.officeId)
+    .eq("office_id", s.officeId)
     .eq("site_id", siteId)
     .gte("work_date", start)
     .lte("work_date", end)
 
   if (dsErr) return jsonError(dsErr.message, 500)
 
+  // 3) settled(=ACCUMULATED & payout_id null) by batch
   const { data: piRows, error: piErr } = await supabaseAdmin
     .from("payout_items")
     .select("payee_type, payee_id, payout_id, status")
-    .eq("office_id", session.officeId)
-    .eq("site_id", siteId)
-    .eq("period_start", start)
-    .eq("period_end", end)
+    .eq("office_id", s.officeId)
+    .eq("settlement_batch_id", batchId)
     .is("payout_id", null)
     .eq("status", "ACCUMULATED")
 
@@ -106,42 +139,12 @@ export async function GET(req: Request) {
     if (r.payee_type === "FOREMAN") settledForemanIds.add(String(r.payee_id))
   }
 
-  // 3) worker 로드(이름/역할)
-  const { data: workers, error: wErr } = await supabaseAdmin
-    .from("workers")
-    .select("id, name, phone, worker_roles(roles(name))")
-    .eq("office_id", session.officeId)
-
-  if (wErr) return jsonError(wErr.message, 500)
-
-  const workerById = new Map<string, any>()
-  for (const w of workers ?? []) workerById.set(w.id, w)
-
-  // 4) ✅ worker별 합계/일수: "금액확정(locked=true)"만 집계
-  // 정책: 확정대기(locked=false)는 정산 대상 제외
-  const agg = new Map<string, { gross: number; days: number }>()
-  for (const r of ds ?? []) {
-    if (!r.locked) continue
-    const id = r.worker_id as string
-    const prev = agg.get(id) ?? { gross: 0, days: 0 }
-    agg.set(id, {
-      gross: prev.gross + (r.daily_wage ?? 0),
-      days: prev.days + 1,
-    })
-  }
-
-  // 4-1) ✅ 이미 지급완료(PAID)된 payee는 정산 목록에서 제외
-  // 정책: 같은 site + 같은 기간(start/end)에서 payout_items가 PAID면 정산 화면에 남기지 않음
-  // ✅ 이미 지급완료(PAID)된 payee는 정산 목록에서 제외
-  // 핵심: 팀 해체(teams 삭제) 후에도 과거 지급 범위를 유지하려면,
-  //       "현재 팀 구성"이 아니라 "payout_items.member_ids 스냅샷"으로 팀원을 제외해야 함.
+  // 4) paid by batch (hide)
   const { data: paidItems, error: paidErr } = await supabaseAdmin
     .from("payout_items")
     .select("payee_type, payee_id, member_ids")
-    .eq("office_id", session.officeId)
-    .eq("site_id", siteId)
-    .eq("period_start", start)
-    .eq("period_end", end)
+    .eq("office_id", s.officeId)
+    .eq("settlement_batch_id", batchId)
     .eq("status", "PAID")
 
   if (paidErr) return jsonError(paidErr.message, 500)
@@ -160,8 +163,6 @@ export async function GET(req: Request) {
 
     if (payeeType === "FOREMAN") {
       if (payeeId) paidForemanIds.add(payeeId)
-
-      // ✅ FOREMAN 지급완료면, 그때의 팀원 스냅샷(member_ids)도 같이 지급완료로 간주하여 제외
       const mids = Array.isArray((it as any).member_ids) ? (it as any).member_ids : []
       for (const mid of mids) {
         if (mid) paidWorkerIds.add(String(mid))
@@ -169,19 +170,31 @@ export async function GET(req: Request) {
     }
   }
 
-  // ✅ 팀 지급이 PAID인 경우(FOREMAN), 리더는 개인(PROXY)로 다시 뜨면 안 됨.
-  // TEAM 타겟은 paidForemanIds로 제외되지만, TEAM 루프를 continue로 건너뛰면 usedInTeam에 leaderId가 안 들어가서
-  // 아래 worker(PROXY) 생성 루프에서 리더가 다시 등장할 수 있다.
-  // 따라서 여기서 미리 “PAID된 FOREMAN 리더”를 usedInTeam에 넣어 개인 타겟 생성을 막는다.
-  const paidLeaderIds = new Set<string>(Array.from(paidForemanIds))
+  // 5) workers
+  const { data: workers, error: wErr } = await supabaseAdmin
+    .from("workers")
+    .select("id, name, phone, worker_roles(roles(name))")
+    .eq("office_id", s.officeId)
 
-  // 5) ✅ DB에서 팀 구성 로드: teams + team_members
-  // 정책: 팀은 전체 인력 풀 (teams.site_id NULL 가능), 하지만 site별 팀도 가능
-  // 여기서는 "해당 현장(siteId) 팀" + "global 팀(site_id is null)" 둘 다 포함
+  if (wErr) return jsonError(wErr.message, 500)
+
+  const workerById = new Map<string, any>()
+  for (const w of workers ?? []) workerById.set(w.id, w)
+
+  // 6) aggregate locked=true only
+  const agg = new Map<string, { gross: number; days: number }>()
+  for (const r of ds ?? []) {
+    if (!r.locked) continue
+    const id = r.worker_id as string
+    const prev = agg.get(id) ?? { gross: 0, days: 0 }
+    agg.set(id, { gross: prev.gross + (r.daily_wage ?? 0), days: prev.days + 1 })
+  }
+
+  // 7) teams
   const { data: teamRows, error: teamErr } = await supabaseAdmin
     .from("teams")
     .select("id, leader_worker_id, site_id")
-    .eq("office_id", session.officeId)
+    .eq("office_id", s.officeId)
     .or(`site_id.is.null,site_id.eq.${siteId}`)
 
   if (teamErr) return jsonError(teamErr.message, 500)
@@ -199,40 +212,34 @@ export async function GET(req: Request) {
     teamMemberRows = data ?? []
   }
 
-  // leader -> memberIds 구성
-  const leaderToMembers = new Map<string, string[]>()
-  const leaderToTeamId = new Map<string, string>()
-  for (const t of teamRows ?? []) {
-    leaderToTeamId.set(t.leader_worker_id, t.id)
-    leaderToMembers.set(t.leader_worker_id, [])
-  }
-  for (const m of teamMemberRows) {
-    // team_id -> leader 찾기
-    const team = (teamRows ?? []).find((t: any) => t.id === m.team_id)
-    const leaderId = team?.leader_worker_id
-    if (!leaderId) continue
+  const teamById = new Map<string, any>()
+  for (const t of teamRows ?? []) teamById.set(String(t.id), t)
 
+  const leaderToMembers = new Map<string, string[]>()
+  for (const t of teamRows ?? []) leaderToMembers.set(String(t.leader_worker_id), [])
+
+  for (const m of teamMemberRows) {
+    const team = teamById.get(String(m.team_id))
+    const leaderId = String(team?.leader_worker_id ?? "")
+    if (!leaderId) continue
     const arr = leaderToMembers.get(leaderId) ?? []
     if (!arr.includes(m.worker_id)) arr.push(m.worker_id)
     leaderToMembers.set(leaderId, arr)
   }
 
-  const usedInTeam = new Set<string>()
   const targets: any[] = []
+  const usedInTeam = new Set<string>()
 
-  // 6) TEAM 타겟 생성 (반장 + 팀원 합계)
+  // 8) TEAM targets
   for (const [leaderId, memberIds] of leaderToMembers.entries()) {
-    // ✅ 지급완료(PAID)된 팀은 정산 화면에서 제외 (옵션 A)
     if (paidForemanIds.has(String(leaderId))) continue
-    // 리더나 팀원이 기간 내 원장(agg)에 하나도 없으면 TEAM 타겟 생성 여부 정책
-    // 현재는 "기간에 원장 없으면 스킵"으로 두는 것이 안전.
+
     const leaderAgg = agg.get(leaderId)
     const memberAggExists = memberIds.some((mid) => agg.has(mid))
     if (!leaderAgg && !memberAggExists) continue
 
-    const leaderA = leaderAgg ?? { gross: 0, days: 0 }
-    let total = leaderA.gross
-    let days = leaderA.days
+    let total = (leaderAgg?.gross ?? 0)
+    let days = (leaderAgg?.days ?? 0)
 
     for (const mid of memberIds) {
       const ma = agg.get(mid)
@@ -241,7 +248,6 @@ export async function GET(req: Request) {
       days += ma.days
       usedInTeam.add(mid)
     }
-
     usedInTeam.add(leaderId)
 
     const leader = workerById.get(leaderId)
@@ -250,7 +256,7 @@ export async function GET(req: Request) {
     targets.push({
       id: `team-${siteId}-${leaderId}-${start}-${end}`,
       type: "team",
-      teamId: leaderId, // (주의) 프론트가 teamId를 leaderId로 쓰는 구조라면 유지. 정규화 team.id를 쓰고 싶으면 여기 바꾸기.
+      teamId: leaderId,
       name: `${name} 팀`,
       occupation: "TEAM",
       attendanceDays: days,
@@ -266,12 +272,12 @@ export async function GET(req: Request) {
       memberCount: memberIds.length,
       memberIds,
       status: total > 0 ? (settledForemanIds.has(String(leaderId)) ? "SETTLED" : "READY") : "UNSETTLED",
+      settlementBatchId: batchId,
     })
   }
 
-  // 7) 나머지 worker 타겟 생성 (기본 PROXY)
+  // 9) worker targets
   for (const [workerId, a] of agg.entries()) {
-    if (paidLeaderIds.has(String(workerId))) continue
     if (usedInTeam.has(workerId)) continue
     if (paidWorkerIds.has(String(workerId))) continue
 
@@ -282,9 +288,6 @@ export async function GET(req: Request) {
       w?.worker_roles?.[0]?.roles?.[0]?.name ||
       "일반"
 
-    const mode: SettlementMode = "PROXY"
-
-    // PROXY: rules에서 수수료 결정
     const rule = pickRule(rules, workerId, occupation, ym)
     const { commission, label } = calcCommission(a.gross, rule)
     const netPay = Math.max(0, a.gross - commission)
@@ -297,7 +300,7 @@ export async function GET(req: Request) {
       occupation,
       attendanceDays: a.days,
       attendanceHours: 0,
-      mode,
+      mode: "PROXY" as SettlementMode,
       introFee: 0,
       dailyWage: a.days > 0 ? Math.round(a.gross / a.days) : 0,
       commission,
@@ -308,8 +311,9 @@ export async function GET(req: Request) {
       memberCount: 0,
       memberIds: [],
       status: a.gross > 0 ? (settledWorkerIds.has(String(workerId)) ? "SETTLED" : "READY") : "UNSETTLED",
+      settlementBatchId: batchId,
     })
   }
 
-  return NextResponse.json({ settlements: targets })
+  return NextResponse.json({ settlements: targets, settlementBatchId: batchId })
 }
