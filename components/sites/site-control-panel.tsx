@@ -85,14 +85,14 @@ interface SiteControlPanelProps {
   onDeleteSite?: (siteId: string) => void
 }
 
-const siteStatuses = ["미진행", "배차대기", "배차완료", "정산완료"] as const
+const siteStatuses = ["미진행", "배차대기", "배차완료", "금액확정"] as const
 type SiteStatusType = (typeof siteStatuses)[number]
 
 const statusColors: Record<SiteStatusType, string> = {
   미진행: "bg-muted text-muted-foreground",
   배차대기: "bg-status-waiting text-status-waiting-foreground",
   배차완료: "bg-status-progress text-status-progress-foreground",
-  정산완료: "bg-status-pending text-status-pending-foreground",
+  금액확정: "bg-status-pending text-status-pending-foreground",
 }
 
 export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPanelProps) {
@@ -160,7 +160,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     calculatedAmount: number
     adjustment: number
     finalAmount: number
-    status: "미정산" | "정산완료"
+    status: "미정산" | "금액확정"
   }[]>([])
   const [settlementDateRange, setSettlementDateRange] = useState({ start: "", end: "" })
 
@@ -1512,7 +1512,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                         </TableCell>
                         <TableCell>
                           {(() => {
-                            const viewStatus = row.status === "정산완료" ? "금액확정" : "확정대기"
+                            const viewStatus = row.status === "금액확정" ? "금액확정" : "확정대기"
                             const cls =
                               viewStatus === "금액확정"
                                 ? "bg-status-progress text-status-progress-foreground"

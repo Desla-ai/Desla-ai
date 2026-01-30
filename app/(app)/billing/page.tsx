@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import { AppShell } from "@/components/layout/app-shell"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -73,6 +73,16 @@ type InvoiceStatus = "초안" | "발행" | "입금완료"
 const lineItemCategories = ["인건비", "장비", "자재", "기타"] as const
 type LineItemCategory = (typeof lineItemCategories)[number]
 
+type InvoiceAttachment = {
+  id: string
+  name: string
+  mime: string
+  size: number
+  path: string
+  url: string | null
+  createdAt: string
+}
+
 // Invoice interface
 interface InvoiceLineItem {
   id: string
@@ -97,7 +107,7 @@ interface Invoice {
   tax: number
   total: number
   notes: string
-  attachments: string[]
+  attachments: InvoiceAttachment[]
   createdAt: string
   updatedAt: string
 }
@@ -113,70 +123,7 @@ export default function BillingPage() {
   const { state } = useAppStore()
 
   // Invoice state (would be stored in global state in production)
-  const [invoices, setInvoices] = useState<Invoice[]>([
-    {
-      id: "inv1",
-      invoiceNumber: "INV-2025-001",
-      siteId: "s1",
-      siteName: "강남 오피스텔 신축현장",
-      contractorName: "대림건설",
-      status: "발행",
-      issueDate: "2025-01-15",
-      dueDate: "2025-02-15",
-      lineItems: [
-        { id: "li1", category: "인건비", description: "일용직 인건비 (1/1~1/15)", quantity: 15, unitPrice: 200000, amount: 3000000 },
-        { id: "li2", category: "장비", description: "크레인 임대료", quantity: 1, unitPrice: 500000, amount: 500000 },
-      ],
-      subtotal: 3500000,
-      tax: 350000,
-      total: 3850000,
-      notes: "1월 전반기 청구분",
-      attachments: [],
-      createdAt: "2025-01-15T09:00:00Z",
-      updatedAt: "2025-01-15T09:00:00Z",
-    },
-    {
-      id: "inv2",
-      invoiceNumber: "INV-2025-002",
-      siteId: "s2",
-      siteName: "판교 테크노밸리 2차",
-      contractorName: "GS건설",
-      status: "초안",
-      issueDate: "",
-      dueDate: "",
-      lineItems: [
-        { id: "li3", category: "인건비", description: "일용직 인건비 (1/16~1/31)", quantity: 20, unitPrice: 200000, amount: 4000000 },
-      ],
-      subtotal: 4000000,
-      tax: 400000,
-      total: 4400000,
-      notes: "",
-      attachments: [],
-      createdAt: "2025-01-28T09:00:00Z",
-      updatedAt: "2025-01-28T09:00:00Z",
-    },
-    {
-      id: "inv3",
-      invoiceNumber: "INV-2024-045",
-      siteId: "s3",
-      siteName: "송파 아파트 리모델링",
-      contractorName: "현대건설",
-      status: "입금완료",
-      issueDate: "2024-12-20",
-      dueDate: "2025-01-20",
-      lineItems: [
-        { id: "li4", category: "인건비", description: "12월 인건비", quantity: 10, unitPrice: 200000, amount: 2000000 },
-        { id: "li5", category: "자재", description: "안전장비", quantity: 5, unitPrice: 50000, amount: 250000 },
-      ],
-      subtotal: 2250000,
-      tax: 225000,
-      total: 2475000,
-      notes: "완료",
-      attachments: ["receipt.pdf"],
-      createdAt: "2024-12-20T09:00:00Z",
-      updatedAt: "2025-01-22T14:30:00Z",
-    },
-  ])
+  const [invoices, setInvoices] = useState<Invoice[]>([])
 
   const [statusFilter, setStatusFilter] = useState<string>("all")
   const [siteFilter, setSiteFilter] = useState<string>("all")
@@ -185,6 +132,8 @@ export default function BillingPage() {
   // Create invoice dialog
   const [createDialogOpen, setCreateDialogOpen] = useState(false)
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+
 
   // New invoice form
   const [newInvoiceSiteId, setNewInvoiceSiteId] = useState("")
@@ -193,6 +142,68 @@ export default function BillingPage() {
   const [newInvoiceLineItems, setNewInvoiceLineItems] = useState<InvoiceLineItem[]>([
     { id: "new1", category: "인건비", description: "", quantity: 1, unitPrice: 0, amount: 0 }
   ])
+
+  const [newInvoiceAttachments, setNewInvoiceAttachments] = useState<InvoiceAttachment[]>([])
+  const [isUploading, setIsUploading] = useState(false)
+
+  async function uploadFiles(files: FileList | File[]) {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+
+    setIsUploading(true);
+    try {
+      for (const file of list) {
+        const initRes = await fetch("/api/uploads/invoice-attachments/init", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fileName: file.name, mime: file.type, size: file.size }),
+        });
+        const init = await initRes.json();
+        if (!initRes.ok) throw new Error(init.error ?? "업로드 준비 실패");
+
+        // ✅ 가장 안전: Blob으로 감싸서 BodyInit 확실히 만족
+        const putRes = await fetch(init.uploadUrl, {
+          method: "PUT",
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+          body: new Blob([file], { type: file.type || "application/octet-stream" }),
+        });
+        if (!putRes.ok) throw new Error("스토리지 업로드 실패");
+
+        const signRes = await fetch("/api/uploads/invoice-attachments/sign", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paths: [init.attachmentDraft.path], expiresIn: 60 * 30 }),
+        });
+        const signed = await signRes.json();
+        const url = signed?.signed?.[0]?.url ?? null;
+
+        setNewInvoiceAttachments((prev) => [...prev, { ...init.attachmentDraft, url }]);
+      }
+
+      toast.success("첨부파일 업로드 완료");
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+
+  useEffect(() => {
+    let cancelled = false
+      ; (async () => {
+        try {
+          setIsLoading(true)
+          const res = await fetch("/api/invoices?status=all", { cache: "no-store" })
+          const data = await res.json()
+          if (!cancelled) setInvoices(data.invoices ?? [])
+        } catch (e: any) {
+          toast.error(e?.message ?? "청구서 목록을 불러오지 못했습니다")
+        } finally {
+          if (!cancelled) setIsLoading(false)
+        }
+      })()
+    return () => { cancelled = true }
+  }, [])
+
 
   // Calculated stats
   const stats = useMemo(() => {
@@ -255,43 +266,48 @@ export default function BillingPage() {
     return { subtotal, tax, total: subtotal + tax }
   }
 
-  const handleCreateInvoice = () => {
-    if (!newInvoiceSiteId) {
-      toast.error("현장을 선택해주세요")
-      return
-    }
-    if (!newInvoiceContractor.trim()) {
-      toast.error("건설사명을 입력해주세요")
-      return
-    }
+  const handleCreateInvoice = async () => {
+    if (!newInvoiceSiteId) return toast.error("현장을 선택해주세요")
+    if (!newInvoiceContractor.trim()) return toast.error("건설사명을 입력해주세요")
 
-    const site = state.sites.find(s => s.id === newInvoiceSiteId)
-    const { subtotal, tax, total } = calculateTotals()
+    const lineItems = newInvoiceLineItems
+      .filter(li => li.description.trim() !== "")
+      .map(li => ({
+        category: li.category,
+        description: li.description,
+        quantity: li.quantity,
+        unitPrice: li.unitPrice,
+        amount: li.amount,
+      }))
 
-    const newInvoice: Invoice = {
-      id: `inv${Date.now()}`,
-      invoiceNumber: `INV-2025-${String(invoices.length + 1).padStart(3, "0")}`,
-      siteId: newInvoiceSiteId,
-      siteName: site?.name || "",
-      contractorName: newInvoiceContractor,
-      status: "초안",
-      issueDate: "",
-      dueDate: "",
-      lineItems: newInvoiceLineItems.filter(li => li.description.trim() !== ""),
-      subtotal,
-      tax,
-      total,
-      notes: newInvoiceNotes,
-      attachments: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+    if (lineItems.length === 0) return toast.error("청구 항목을 1개 이상 입력해주세요")
+
+    try {
+      const res = await fetch("/api/invoices", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          siteId: newInvoiceSiteId,
+          contractorName: newInvoiceContractor,
+          notes: newInvoiceNotes,
+          lineItems,
+          attachments: newInvoiceAttachments,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) return toast.error(data.error ?? "청구서 생성 실패")
+
+      setInvoices((prev) => [data.invoice, ...prev])
+      toast.success("청구서가 생성되었습니다")
+
+      resetForm()
+      setNewInvoiceAttachments([])
+      setCreateDialogOpen(false)
+    } catch (e: any) {
+      toast.error(e?.message ?? "청구서 생성 실패")
     }
-
-    setInvoices(prev => [newInvoice, ...prev])
-    toast.success("청구서가 생성되었습니다")
-    resetForm()
-    setCreateDialogOpen(false)
   }
+
 
   const resetForm = () => {
     setNewInvoiceSiteId("")
@@ -302,31 +318,28 @@ export default function BillingPage() {
     ])
   }
 
-  const handleStatusChange = (invoiceId: string, newStatus: InvoiceStatus) => {
-    setInvoices(prev => prev.map(inv => {
-      if (inv.id === invoiceId) {
-        const updates: Partial<Invoice> = {
-          status: newStatus,
-          updatedAt: new Date().toISOString()
-        }
-        if (newStatus === "발행" && !inv.issueDate) {
-          updates.issueDate = new Date().toISOString().split("T")[0]
-          // Default due date: 30 days from issue
-          const dueDate = new Date()
-          dueDate.setDate(dueDate.getDate() + 30)
-          updates.dueDate = dueDate.toISOString().split("T")[0]
-        }
-        return { ...inv, ...updates }
-      }
-      return inv
-    }))
+  const handleStatusChange = async (invoiceId: string, newStatus: InvoiceStatus) => {
+    const res = await fetch(`/api/invoices/${invoiceId}/status`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: newStatus }),
+    })
+    const data = await res.json()
+    if (!res.ok) return toast.error(data.error ?? "상태 변경 실패")
+
+    setInvoices(prev => prev.map(inv => inv.id === invoiceId ? data.invoice : inv))
     toast.success(`청구서 상태가 "${newStatus}"(으)로 변경되었습니다`)
   }
 
-  const handleDeleteInvoice = (invoiceId: string) => {
+  const handleDeleteInvoice = async (invoiceId: string) => {
+    const res = await fetch(`/api/invoices/${invoiceId}`, { method: "DELETE" })
+    const data = await res.json()
+    if (!res.ok) return toast.error(data.error ?? "삭제 실패")
+
     setInvoices(prev => prev.filter(inv => inv.id !== invoiceId))
     toast.success("청구서가 삭제되었습니다")
   }
+
 
   const { subtotal, tax, total } = calculateTotals()
 
@@ -432,7 +445,7 @@ export default function BillingPage() {
               </SelectContent>
             </Select>
             <div className="ml-auto text-sm text-muted-foreground">
-              총 {filteredInvoices.length}건
+              {isLoading ? "불러오는 중..." : `총 ${filteredInvoices.length}건`}
             </div>
           </div>
         </div>
@@ -515,8 +528,7 @@ export default function BillingPage() {
                                     입금 확인
                                   </DropdownMenuItem>
                                 )}
-                                <DropdownMenuItem>
-                                  <Download className="mr-2 h-4 w-4" />
+                                <DropdownMenuItem onClick={() => window.open(`/api/invoices/${invoice.id}/pdf`, "_blank")}>
                                   PDF 다운로드
                                 </DropdownMenuItem>
                                 {invoice.status === "초안" && (
@@ -683,13 +695,57 @@ export default function BillingPage() {
               {/* Attachments placeholder */}
               <div className="grid gap-2">
                 <Label>첨부파일</Label>
-                <div className="flex items-center justify-center rounded-lg border border-dashed border-border p-6 text-center">
+
+                <div
+                  className={cn(
+                    "flex items-center justify-center rounded-lg border border-dashed border-border p-6 text-center",
+                    "cursor-pointer hover:bg-muted/30 transition"
+                  )}
+                  onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
+                  onDrop={(e) => { e.preventDefault(); e.stopPropagation(); void uploadFiles(e.dataTransfer.files) }}
+                  onClick={() => document.getElementById("invoice-attach-input")?.click()}
+                >
+                  <input
+                    id="invoice-attach-input"
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => {
+                      const files = e.target.files
+                      if (files) void uploadFiles(files)
+                      e.currentTarget.value = ""
+                    }}
+                  />
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
                     <Paperclip className="h-8 w-8" />
                     <p className="text-sm">파일을 드래그하거나 클릭하여 첨부</p>
                     <p className="text-xs">(PDF, 이미지 등 증빙자료)</p>
+                    {isUploading && <p className="text-xs">업로드 중...</p>}
                   </div>
                 </div>
+
+                {newInvoiceAttachments.length > 0 && (
+                  <div className="space-y-2">
+                    {newInvoiceAttachments.map((att) => (
+                      <div key={att.id} className="flex items-center justify-between rounded-lg border border-border p-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{att.name}</p>
+                          <p className="text-xs text-muted-foreground truncate">{att.mime} · {Math.round(att.size / 1024)}KB</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button variant="outline" size="sm" onClick={() => att.url && window.open(att.url, "_blank")} disabled={!att.url}>
+                            <Download className="mr-2 h-4 w-4" />
+                            열기
+                          </Button>
+                          <Button variant="ghost" size="icon" onClick={() => setNewInvoiceAttachments(prev => prev.filter(x => x.id !== att.id))}>
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
               </div>
             </div>
           </div>

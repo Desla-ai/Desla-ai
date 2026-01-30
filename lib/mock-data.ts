@@ -7,7 +7,8 @@ export interface Site {
   plannedWorkers: number
   assignedWorkers: number
   todayRequired: number
-  status: "미진행" | "배차대기" | "배차완료" | "정산완료"
+  status: "미진행" | "배차대기" | "배차완료" | "금액확정"
+
   progress: number
   checkInTime: string
   officePhone: string
@@ -111,7 +112,7 @@ export const mockSites: Site[] = [
     plannedWorkers: 15,
     assignedWorkers: 15,
     todayRequired: 10,
-    status: "정산완료",
+    status: "금액확정",
     progress: 100,
     checkInTime: "08:00",
     officePhone: "0224681357",

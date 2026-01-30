@@ -25,7 +25,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
-import { type Site } from "@/lib/mock-data"
+import { type Site, type Worker } from "@/lib/mock-data"
 import { formatDateRange, formatPhone } from "@/lib/format"
 import { Search, MessageSquare, X, Plus, Building2, Save } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -33,6 +33,8 @@ import { toast } from "sonner"
 
 interface SiteListPanelProps {
   sites: Site[]
+  // ✅ sites 카드의 "배치 n명"을 DB/스토어의 workers로 계산하기 위해 주입
+  workers: Worker[]
   selectedSiteId: string | null
   onSelectSite: (siteId: string) => void
   checkedSiteIds: string[]
@@ -41,14 +43,14 @@ interface SiteListPanelProps {
   onAddWorker?: () => void // Declare the onAddWorker variable
 }
 
-const statusFilters = ["미진행", "배차대기", "배차완료", "정산완료"] as const
+const statusFilters = ["미진행", "배차대기", "배차완료", "금액확정"] as const
 type StatusType = (typeof statusFilters)[number]
 
 const statusColors: Record<StatusType, string> = {
   미진행: "bg-muted text-muted-foreground",
   배차대기: "bg-status-waiting text-status-waiting-foreground",
   배차완료: "bg-status-progress text-status-progress-foreground",
-  정산완료: "bg-status-pending text-status-pending-foreground",
+  금액확정: "bg-status-pending text-status-pending-foreground",
 }
 
 // SMS Template system
@@ -61,12 +63,13 @@ const smsTemplates = [
 
 export function SiteListPanel({
   sites,
+  workers,
   selectedSiteId,
   onSelectSite,
   checkedSiteIds,
   onCheckedSiteIdsChange,
   onAddSite,
-  onAddWorker, // Pass the onAddWorker prop
+  onAddWorker,
 }: SiteListPanelProps) {
   const [search, setSearch] = useState("")
   const [activeFilter, setActiveFilter] = useState<StatusType | null>(null)
@@ -99,6 +102,16 @@ export function SiteListPanel({
       onCheckedSiteIdsChange(checkedSiteIds.filter((id) => id !== siteId))
     }
   }
+
+    const getAssignedCountForSite = (siteId: string) => {
+    // Worker 필드명은 camel/snake 혼용 가능성이 있어 둘 다 대응
+    return workers.filter((w) => {
+      const assigned = (w as any).assignedSiteId ?? (w as any).assigned_site_id ?? null
+      const isFixed = (w as any).isFixed ?? (w as any).is_fixed ?? false
+      return assigned === siteId && Boolean(isFixed) !== undefined // 단순 안전장치
+    }).length
+  }
+
 
   const handleClearSelection = () => {
     onCheckedSiteIdsChange([])
@@ -342,7 +355,7 @@ export function SiteListPanel({
                       {formatDateRange(site.startDate, site.endDate)}
                     </span>
                     <span className="text-xs text-muted-foreground">
-                      오늘 필요 {site.todayRequired}명 / 배치 {site.assignedWorkers}명
+                      오늘 필요 {site.todayRequired}명 / 배치 {getAssignedCountForSite(site.id)}명
                     </span>
                   </button>
                 </div>

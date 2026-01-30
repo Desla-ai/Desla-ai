@@ -5,12 +5,13 @@ import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Site } from "@/lib/mock-data"
+import { Site, Worker } from "@/lib/mock-data"
 import { Building2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface SiteProgressCardProps {
   sites: Site[]
+  workers: Worker[]
   isLoading?: boolean
 }
 
@@ -18,10 +19,10 @@ const statusColors: Record<string, string> = {
   미진행: "bg-muted text-muted-foreground",
   배차대기: "bg-status-waiting text-status-waiting-foreground",
   배차완료: "bg-status-progress text-status-progress-foreground",
-  정산완료: "bg-status-pending text-status-pending-foreground",
+  금액확정: "bg-status-pending text-status-pending-foreground",
 }
 
-export function SiteProgressCard({ sites, isLoading }: SiteProgressCardProps) {
+export function SiteProgressCard({ sites, workers, isLoading }: SiteProgressCardProps) {
   if (isLoading) {
     return (
       <Card>
@@ -64,25 +65,40 @@ export function SiteProgressCard({ sites, isLoading }: SiteProgressCardProps) {
       <CardContent className="p-0">
         <ScrollArea className="h-[280px]">
           <div className="flex flex-col gap-3 px-6 pb-4">
-            {sites.slice(0, 8).map((site) => (
-              <div key={site.id} className="flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-sm font-medium truncate">{site.name}</span>
-                    <Badge variant="secondary" className={cn("text-[10px] shrink-0", statusColors[site.status])}>
-                      {site.status}
-                    </Badge>
+            {sites.slice(0, 8).map((site) => {
+              // ✅ 고정+당일 합산: assignedSiteId(또는 assigned_site_id)로만 필터
+              const assignedCount = workers.filter((w) => {
+                const assigned = (w as any).assignedSiteId ?? (w as any).assigned_site_id ?? null
+                return assigned === site.id
+              }).length
+
+              const required = Number(site.todayRequired ?? 0)
+              const progress = required > 0 ? Math.round((assignedCount / required) * 100) : 0
+
+              return (
+                <div key={site.id} className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sm font-medium truncate">{site.name}</span>
+                      <Badge
+                        variant="secondary"
+                        className={cn("text-[10px] shrink-0", statusColors[site.status])}
+                      >
+                        {site.status}
+                      </Badge>
+                    </div>
+                    <span className="text-xs text-muted-foreground shrink-0 ml-2">
+                      {assignedCount} / {required}명
+                    </span>
                   </div>
-                  <span className="text-xs text-muted-foreground shrink-0 ml-2">
-                    {site.assignedWorkers} / {site.todayRequired}명
-                  </span>
+
+                  <div className="flex items-center gap-2">
+                    <Progress value={progress} className="h-2 flex-1" />
+                    <span className="text-xs text-muted-foreground w-9 text-right">{progress}%</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Progress value={site.progress} className="h-2 flex-1" />
-                  <span className="text-xs text-muted-foreground w-9 text-right">{site.progress}%</span>
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </ScrollArea>
       </CardContent>

@@ -44,6 +44,7 @@ export default function SitesPage() {
       <aside className="w-80 lg:w-[400px] shrink-0 border-r border-border bg-card overflow-hidden">
         <SiteListPanel
           sites={state.sites}
+          workers={state.workers}
           selectedSiteId={state.uiState.selectedSiteId}
           onSelectSite={handleSelectSite}
           checkedSiteIds={checkedSiteIds}

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { AppShell } from "@/components/layout/app-shell"
 import { KpiCard } from "@/components/dashboard/kpi-card"
@@ -42,12 +42,12 @@ const siteStatusColors: Record<string, string> = {
   미진행: "bg-muted text-muted-foreground",
   배차대기: "bg-status-waiting text-status-waiting-foreground",
   배차완료: "bg-status-progress text-status-progress-foreground",
-  정산완료: "bg-status-pending text-status-pending-foreground",
+  금액확정: "bg-status-pending text-status-pending-foreground",
 }
 
 export default function HomePage() {
   const router = useRouter()
-  const { state, setSelectedSiteId, updateWorker, moveWorkerToWaiting } = useAppStore()
+  const { state, setSelectedSiteId, updateWorker, updateSite } = useAppStore()
   const [globalRolloverDialogOpen, setGlobalRolloverDialogOpen] = useState(false)
   const [isRollingOver, setIsRollingOver] = useState(false)
 
@@ -57,7 +57,7 @@ export default function HomePage() {
   // Calculate KPI values from global state (using all sites for counts)
   const dispatchPendingSites = state.sites.filter((s) => s.status === "배차대기")
   const dispatchCompleteSites = state.sites.filter((s) => s.status === "배차완료")
-  const settlementCompleteSites = state.sites.filter((s) => s.status === "정산완료")
+  const settlementCompleteSites = state.sites.filter((s) => s.status === "금액확정")
 
   const waitingWorkers = state.workers.filter((w) => w.status === "미출근")
   const checkedInWorkers = state.workers.filter((w) => w.status === "출근")
@@ -69,6 +69,18 @@ export default function HomePage() {
   const completedBillings = state.settlements
     .filter((s) => s.status === "완료")
     .reduce((sum, s) => sum + s.amount, 0)
+
+  const [invoices, setInvoices] = useState([])
+  useEffect(() => {
+    ; (async () => {
+      const res = await fetch("/api/invoices?status=pending", { cache: "no-store" })
+      const data = await res.json()
+      setInvoices(data.invoices ?? [])
+    })()
+  }, [])
+
+
+
 
   // Copy canonical attendance link
   const handleCopyCheckinLink = () => {
@@ -91,29 +103,57 @@ export default function HomePage() {
     setIsRollingOver(true)
 
     try {
-      // API stub: POST /api/sites/rollover-next-day
-      // In production, this would be a server action
-      await new Promise((resolve) => setTimeout(resolve, 1000))
+      // 1) 인력 롤오버
+      // - 고정: 배치 상태/배정 유지
+      // - 비고정: 미출근 + 배정 해제
+      for (const w of state.workers) {
+        const isFixed = (w as any).isFixed ?? (w as any).is_fixed ?? false
+        const assigned = (w as any).assignedSiteId ?? (w as any).assigned_site_id ?? null
 
-      // Get all daily assigned workers across all sites and reset them
-      for (const assignment of state.assignments) {
-        for (const workerId of assignment.assignedWorkerIds) {
-          const worker = state.workers.find((w) => w.id === workerId)
-          if (worker && !worker.isFixed) {
-            moveWorkerToWaiting(workerId, assignment.siteId)
-            updateWorker({ ...worker, status: "미출근", assignedSiteId: undefined })
-          }
+        if (isFixed) {
+          // ✅ 고정 인력은 배치 유지 (요구사항)
+          // assignedSiteId는 유지, status는 "배치"로 고정
+          // (이미 배치가 아니더라도 다음날 기준 '고정 배치'는 배치로 간주)
+          await updateWorker({
+            ...(w as any),
+            status: "배치",
+            assignedSiteId: assigned ?? (w as any).assignedSiteId,
+            isFixed: true,
+          } as any)
+        } else {
+          // ✅ 비고정 인력은 풀로 복귀
+          await updateWorker({
+            ...(w as any),
+            status: "미출근",
+            assignedSiteId: undefined,
+            isFixed: false,
+          } as any)
         }
+      }
+
+      // 2) 현장 상태 롤오버
+      // - 미진행은 유지
+      // - 그 외는 배차대기로
+      for (const s of state.sites) {
+        if (s.status === "미진행") continue
+        if (s.status === "배차대기") continue
+
+        await updateSite({
+          ...(s as any),
+          status: "배차대기",
+        } as any)
       }
 
       toast.success("전체 현장이 다음 날로 넘어갔습니다.")
       setGlobalRolloverDialogOpen(false)
-    } catch {
-      toast.error("롤오버 중 오류가 발생했습니다.")
+    } catch (e: any) {
+      toast.error(e?.message ?? "롤오버 중 오류가 발생했습니다.")
     } finally {
       setIsRollingOver(false)
     }
   }
+
+
 
   const today = new Date()
   const tomorrow = new Date(today)
@@ -159,7 +199,7 @@ export default function HomePage() {
             variant="default"
           />
           <KpiCard
-            title="정산완료 현장"
+            title="금액확정 현장"
             value={`${settlementCompleteSites.length}개`}
             icon={Building2}
             variant="default"
@@ -197,14 +237,17 @@ export default function HomePage() {
         {/* Content Cards - 3 columns */}
         <div className="grid gap-6 lg:grid-cols-3">
           {/* Site Progress */}
-          <SiteProgressCard sites={activeSites.filter((s) => s.status !== "정산완료")} />
+          <SiteProgressCard
+            sites={activeSites.filter((s) => s.status !== "금액확정")}
+            workers={state.workers}
+          />
 
           {/* Settlement Completed Sites - NEW */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <CheckCircle className="h-5 w-5" />
-                정산 완료 현장
+                금액 확정 현장
               </CardTitle>
             </CardHeader>
             <CardContent className="p-0">
@@ -213,7 +256,7 @@ export default function HomePage() {
                   {settlementCompleteSites.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-8 text-center px-4">
                       <Building2 className="mb-3 h-10 w-10 text-muted-foreground/50" />
-                      <p className="text-sm text-muted-foreground">정산 완료된 현장이 없습니다</p>
+                      <p className="text-sm text-muted-foreground">금액 확정된 현장이 없습니다</p>
                     </div>
                   ) : (
                     <>
@@ -231,7 +274,7 @@ export default function HomePage() {
                               <p className="font-medium truncate text-sm">{site.name}</p>
                               <div className="flex items-center gap-2 mt-1">
                                 <Badge className="text-xs shrink-0 bg-status-pending text-status-pending-foreground">
-                                  정산완료
+                                  금액확정
                                 </Badge>
                                 <span className="text-xs text-muted-foreground truncate">
                                   {formatDateRange(site.startDate, site.endDate)}
@@ -242,7 +285,7 @@ export default function HomePage() {
                           </button>
                         </div>
                       ))}
-                      
+
                     </>
                   )}
                 </div>
@@ -255,7 +298,7 @@ export default function HomePage() {
                     className="w-full"
                     onClick={handleNavigateToCompletedSettlements}
                   >
-                    정산 완료 현장 보기
+                    금액 확정 현장 보기
                     <ChevronRight className="ml-1 h-4 w-4" />
                   </Button>
                 </div>
@@ -264,7 +307,7 @@ export default function HomePage() {
           </Card>
 
           {/* Settlement Alerts */}
-          <SettlementAlertCard settlements={state.settlements} />
+          <SettlementAlertCard invoices={invoices} />
         </div>
       </div>
 
