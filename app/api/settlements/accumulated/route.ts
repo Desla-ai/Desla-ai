@@ -17,13 +17,12 @@ type AccRow = {
   workerId: string
   workerName: string
   role: string
-  attendanceDays: number
-  attendanceHours: number
-  unitPrice: number
+  attendanceDays: number // ✅ 이제 "일수"가 아니라 "공수 합계"로 사용 (UI에서 공수로 표기)
+  unitPrice: number      // ✅ 공수당(단가) (기간 내 가중평균 단가)
   calculatedAmount: number
   adjustment: number
   finalAmount: number
-  status: "미정산" | "정산완료"
+  status: "확정대기" | "금액확정"
 }
 
 export async function GET(req: Request) {
@@ -37,6 +36,7 @@ export async function GET(req: Request) {
   const end = String(url.searchParams.get("end") ?? "").trim()
 
   if (!siteId) return jsonError("siteId is required", 400)
+
   const startDate = parseDate(start)
   const endDate = parseDate(end)
   if (!startDate || !endDate) return jsonError("start/end must be YYYY-MM-DD", 400)
@@ -52,10 +52,10 @@ export async function GET(req: Request) {
   if (siteError) return jsonError(siteError.message, 500)
   if (!site || site.office_id !== session.officeId) return jsonError("Forbidden", 403)
 
-  // 기간 원장
+  // 기간 원장 (✅ work_units 포함)
   const { data: rows, error: rowsError } = await supabaseAdmin
     .from("daily_settlements")
-    .select("worker_id, work_date, daily_wage, locked")
+    .select("worker_id, work_date, daily_wage, work_units, locked")
     .eq("office_id", session.officeId)
     .eq("site_id", siteId)
     .gte("work_date", startDate)
@@ -74,19 +74,26 @@ export async function GET(req: Request) {
   const workerById = new Map<string, any>()
   for (const w of workers ?? []) workerById.set(w.id, w)
 
-  // 집계
-  const agg = new Map<string, { total: number; days: number; anyLocked: boolean }>()
+  // 집계: gross(총액), workUnits(공수합), anyLocked(확정여부)
+  const agg = new Map<string, { gross: number; workUnits: number; anyLocked: boolean }>()
+
   for (const r of rows ?? []) {
     const workerId = r.worker_id as string
-    const prev = agg.get(workerId) ?? { total: 0, days: 0, anyLocked: false }
+
+    const unitPrice = Number((r as any).daily_wage ?? 0)         // 공수당(단가)
+    const workUnits = Number((r as any).work_units ?? 1.0)       // 공수 (DB not null이면 사실상 항상 존재)
+    const gross = unitPrice * workUnits
+
+    const prev = agg.get(workerId) ?? { gross: 0, workUnits: 0, anyLocked: false }
     agg.set(workerId, {
-      total: prev.total + (r.daily_wage ?? 0),
-      days: prev.days + 1,
-      anyLocked: prev.anyLocked || Boolean(r.locked),
+      gross: prev.gross + gross,
+      workUnits: prev.workUnits + workUnits,
+      anyLocked: prev.anyLocked || Boolean((r as any).locked),
     })
   }
 
   const items: AccRow[] = []
+
   for (const [workerId, a] of agg.entries()) {
     const w = workerById.get(workerId)
 
@@ -95,20 +102,23 @@ export async function GET(req: Request) {
       w?.worker_roles?.[0]?.roles?.[0]?.name ||
       "일반"
 
-    const unitPrice = a.days > 0 ? Math.round(a.total / a.days) : 0
+    // 기간 내 가중평균 공수당(단가)
+    const unitPrice = a.workUnits > 0 ? Math.round(a.gross / a.workUnits) : 0
+
+    // 원 단위 정수 유지
+    const calculatedAmount = Math.round(a.gross)
 
     items.push({
       id: `acc-${siteId}-${workerId}-${startDate}-${endDate}`,
       workerId,
       workerName: w?.name ?? "(알수없음)",
       role: roleName,
-      attendanceDays: a.days,
-      attendanceHours: 0,
+      attendanceDays: a.workUnits,      // ✅ 공수 합계
       unitPrice,
-      calculatedAmount: a.total,
+      calculatedAmount,
       adjustment: 0,
-      finalAmount: a.total,
-      status: a.anyLocked ? "정산완료" : "미정산",
+      finalAmount: calculatedAmount,
+      status: a.anyLocked ? "금액확정" : "확정대기",
     })
   }
 

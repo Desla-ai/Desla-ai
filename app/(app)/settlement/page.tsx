@@ -110,7 +110,6 @@ interface SettlementTarget {
   name: string
   occupation: string
   attendanceDays: number
-  attendanceHours: number
   mode: SettlementMode
   // DIRECT mode fields
   introFee: number
@@ -288,7 +287,7 @@ export default function SettlementPage() {
               <Badge
                 variant="outline"
                 className={cn(
-                  selectedSite.status === "정산완료"
+                  selectedSite.status === "금액확정"
                     ? "border-green-500 text-green-600"
                     : "border-muted-foreground"
                 )}
@@ -1442,7 +1441,7 @@ function WorkforceSettlementTab({
                 <TableHead>이름</TableHead>
                 <TableHead>직종</TableHead>
                 <TableHead>정산 방식</TableHead>
-                <TableHead className="text-center">출근일</TableHead>
+                <TableHead className="text-center">공수</TableHead>
                 <TableHead className="text-right">금액</TableHead>
                 <TableHead>상태</TableHead>
               </TableRow>
@@ -1485,7 +1484,7 @@ function WorkforceSettlementTab({
                       {getModeLabel(s.mode)}
                     </Badge>
                   </TableCell>
-                  <TableCell className="text-center">{s.attendanceDays}일</TableCell>
+                  <TableCell className="text-center">{Number(s.attendanceDays ?? 0).toFixed(1)}공수</TableCell>
                   <TableCell className="text-right tabular-nums font-medium">
                     {s.mode === "DIRECT"
                       ? formatKoreanMoney(s.introFee * s.attendanceDays)
@@ -1671,7 +1670,7 @@ function DirectModeForm({
   return (
     <div className="space-y-4">
       <div>
-        <Label className="text-sm font-medium">소개비 (1인당)</Label>
+        <Label className="text-sm font-medium">소개비 (공수당)</Label>
         <Input
           type="number"
           value={target.introFee}
@@ -1691,7 +1690,7 @@ function DirectModeForm({
         <div className="grid grid-cols-2 gap-2 text-sm">
           <span className="text-muted-foreground">출근일</span>
           <span className="text-right font-medium">{target.attendanceDays}일</span>
-          <span className="text-muted-foreground">소개비 (1인당)</span>
+          <span className="text-muted-foreground">소개비 (공수당)</span>
           <span className="text-right font-medium">{formatKoreanMoney(target.introFee)}</span>
           <Separator className="col-span-2 my-1" />
           <span className="text-muted-foreground font-medium">청구 금액</span>

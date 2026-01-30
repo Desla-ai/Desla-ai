@@ -22,7 +22,9 @@ function pickRule(rules: any[], workerId: string, occupation: string, ym: string
   const byWorker = inPeriod.find((r) => r.type === "worker" && r.targetId === workerId)
   if (byWorker) return byWorker
 
-  const byOcc = inPeriod.find((r) => r.type === "occupation" && (r.targetId === occupation || r.targetName === occupation))
+  const byOcc = inPeriod.find(
+    (r) => r.type === "occupation" && (r.targetId === occupation || r.targetName === occupation)
+  )
   if (byOcc) return byOcc
 
   const bySite = inPeriod.find((r) => r.type === "site")
@@ -92,7 +94,9 @@ export async function GET(req: Request) {
   // 1) rules
   const { data: ruleRows, error: ruleErr } = await supabaseAdmin
     .from("settlement_rules")
-    .select("id, site_id, type, target_id, target_name, commission_type, commission_value, effective_start, effective_end")
+    .select(
+      "id, site_id, type, target_id, target_name, commission_type, commission_value, effective_start, effective_end"
+    )
     .eq("office_id", s.officeId)
     .eq("site_id", siteId)
 
@@ -110,10 +114,10 @@ export async function GET(req: Request) {
     effectiveEnd: r.effective_end,
   }))
 
-  // 2) daily_settlements
+  // 2) daily_settlements  ✅ work_units 포함
   const { data: ds, error: dsErr } = await supabaseAdmin
     .from("daily_settlements")
-    .select("worker_id, work_date, daily_wage, locked")
+    .select("worker_id, work_date, daily_wage, work_units, locked")
     .eq("office_id", s.officeId)
     .eq("site_id", siteId)
     .gte("work_date", start)
@@ -122,8 +126,6 @@ export async function GET(req: Request) {
   if (dsErr) return jsonError(dsErr.message, 500)
 
   // 3) payout_items 상태 로드 (batch 기준)
-  // - SETTLED 판정: ACCUMULATED + payout_id IS NULL
-  // - PAID 숨김(Option A): status = PAID
   const { data: piRows, error: piErr } = await supabaseAdmin
     .from("payout_items")
     .select("payee_type, payee_id, payout_id, status, member_ids")
@@ -131,11 +133,9 @@ export async function GET(req: Request) {
     .eq("settlement_batch_id", batchId)
     .in("status", ["ACCUMULATED", "PAID"])
 
-  if (piErr) throw piErr
+  if (piErr) return jsonError(piErr.message, 500)
 
   const paidKeySet = new Set<string>()
-
-  // 팀(FOREMAN) PAID 시 팀원까지 함께 숨기기 위한 확장(선택이지만 권장)
   const paidMemberIdSet = new Set<string>()
 
   for (const r of piRows ?? []) {
@@ -144,15 +144,12 @@ export async function GET(req: Request) {
     if (r.status === "PAID") {
       paidKeySet.add(key)
 
-      // FOREMAN의 member_ids가 있으면 팀원도 같이 숨김 처리
       if (r.payee_type === "FOREMAN" && Array.isArray(r.member_ids)) {
         for (const mid of r.member_ids) paidMemberIdSet.add(String(mid))
       }
-      continue
     }
   }
 
-  // ✅ settled(정산완료/지급예정) = ACCUMULATED + payout_id NULL 만
   const settledWorkerIds = new Set<string>()
   const settledForemanIds = new Set<string>()
 
@@ -164,9 +161,6 @@ export async function GET(req: Request) {
     if (r.payee_type === "FOREMAN") settledForemanIds.add(String(r.payee_id))
   }
 
-
-
-  // 4) paid by batch (hide) — 이미 3)에서 piRows로 계산 가능하므로 중복 쿼리 제거
   const paidWorkerIds = new Set<string>()
   const paidForemanIds = new Set<string>()
 
@@ -176,10 +170,7 @@ export async function GET(req: Request) {
     if (t === "FOREMAN") paidForemanIds.add(id)
   }
 
-  // FOREMAN의 member_ids는 3)에서 paidMemberIdSet으로 이미 확장해 둠
   for (const mid of paidMemberIdSet) paidWorkerIds.add(mid)
-
-  // ✅ FOREMAN으로 지급완료된 팀장은 개인(PROXY)로 다시 뜨면 안 됨
   const paidLeaderIds = new Set<string>(Array.from(paidForemanIds))
 
   // 5) workers
@@ -193,13 +184,26 @@ export async function GET(req: Request) {
   const workerById = new Map<string, any>()
   for (const w of workers ?? []) workerById.set(w.id, w)
 
-  // 6) aggregate locked=true only
-  const agg = new Map<string, { gross: number; days: number }>()
+  // 6) aggregate locked=true only  ✅ A안: gross = 단가(daily_wage) * 공수(work_units)
+  const agg = new Map<
+    string,
+    { gross: number; workUnits: number; unitPriceSum: number; unitPriceCount: number }
+  >()
+
   for (const r of ds ?? []) {
     if (!r.locked) continue
-    const id = r.worker_id as string
-    const prev = agg.get(id) ?? { gross: 0, days: 0 }
-    agg.set(id, { gross: prev.gross + (r.daily_wage ?? 0), days: prev.days + 1 })
+    const workerId = String(r.worker_id)
+    const prev = agg.get(workerId) ?? { gross: 0, workUnits: 0, unitPriceSum: 0, unitPriceCount: 0 }
+
+    const units = Number((r as any).work_units ?? 1)
+    const unitPrice = Number(r.daily_wage ?? 0)
+
+    agg.set(workerId, {
+      gross: prev.gross + unitPrice * units,
+      workUnits: prev.workUnits + units,
+      unitPriceSum: prev.unitPriceSum + unitPrice,
+      unitPriceCount: prev.unitPriceCount + 1,
+    })
   }
 
   // 7) teams
@@ -250,20 +254,25 @@ export async function GET(req: Request) {
     const memberAggExists = memberIds.some((mid) => agg.has(mid))
     if (!leaderAgg && !memberAggExists) continue
 
-    let total = (leaderAgg?.gross ?? 0)
-    let days = (leaderAgg?.days ?? 0)
+    let totalGross = (leaderAgg?.gross ?? 0)
+    let totalWorkUnits = (leaderAgg?.workUnits ?? 0)
+    let unitPriceSum = (leaderAgg?.unitPriceSum ?? 0)
+    let unitPriceCount = (leaderAgg?.unitPriceCount ?? 0)
 
     for (const mid of memberIds) {
       const ma = agg.get(mid)
       if (!ma) continue
-      total += ma.gross
-      days += ma.days
+      totalGross += ma.gross
+      totalWorkUnits += ma.workUnits
+      unitPriceSum += ma.unitPriceSum
+      unitPriceCount += ma.unitPriceCount
       usedInTeam.add(mid)
     }
     usedInTeam.add(leaderId)
 
     const leader = workerById.get(leaderId)
     const name = leader?.name ?? "(반장)"
+    const avgUnitPrice = unitPriceCount > 0 ? Math.round(unitPriceSum / unitPriceCount) : 0
 
     targets.push({
       id: `team-${siteId}-${leaderId}-${start}-${end}`,
@@ -271,40 +280,38 @@ export async function GET(req: Request) {
       teamId: leaderId,
       name: `${name} 팀`,
       occupation: "TEAM",
-      attendanceDays: days,
-      attendanceHours: 0,
+      attendanceDays: totalWorkUnits, // ✅ 기존 필드 유지(프론트에서 라벨을 '공수'로 바꿀 것)
       mode: "TEAM" as SettlementMode,
       introFee: 0,
-      dailyWage: 0,
+      dailyWage: avgUnitPrice, // ✅ 평균 단가(공수당)
       commission: 0,
       commissionRule: "",
       advance: 0,
       netPay: 0,
-      foremanPayoutTotal: total,
+      foremanPayoutTotal: totalGross,
       memberCount: memberIds.length,
       memberIds,
-      status: total > 0 ? (settledForemanIds.has(String(leaderId)) ? "SETTLED" : "READY") : "UNSETTLED",
+      status:
+        totalGross > 0
+          ? settledForemanIds.has(String(leaderId))
+            ? "SETTLED"
+            : "READY"
+          : "UNSETTLED",
       settlementBatchId: batchId,
     })
   }
 
   // 9) worker targets
   for (const [workerId, a] of agg.entries()) {
-    // ✅ 팀장(FOREMAN) 지급완료면 개인(PROXY)로 재등장 금지
     if (paidLeaderIds.has(String(workerId))) continue
-
     if (usedInTeam.has(workerId)) continue
     if (paidWorkerIds.has(String(workerId))) continue
-    // ✅ 팀(FOREMAN) 지급완료 시 팀원도 개인(PROXY)로 다시 뜨면 안 됨
-    // (member_ids 스냅샷이 있을 때 특히 중요)
     if (paidMemberIdSet.has(String(workerId))) continue
 
     const w = workerById.get(workerId)
     const name = w?.name ?? "(알수없음)"
     const occupation =
-      w?.worker_roles?.[0]?.roles?.name ||
-      w?.worker_roles?.[0]?.roles?.[0]?.name ||
-      "일반"
+      w?.worker_roles?.[0]?.roles?.name || w?.worker_roles?.[0]?.roles?.[0]?.name || "일반"
 
     const rule = pickRule(rules, workerId, occupation, ym)
     const { commission, label } = calcCommission(a.gross, rule)
@@ -316,11 +323,10 @@ export async function GET(req: Request) {
       workerId,
       name,
       occupation,
-      attendanceDays: a.days,
-      attendanceHours: 0,
+      attendanceDays: a.workUnits, // ✅ 프론트 라벨 '공수'
       mode: "PROXY" as SettlementMode,
       introFee: 0,
-      dailyWage: a.days > 0 ? Math.round(a.gross / a.days) : 0,
+      dailyWage: a.workUnits > 0 ? Math.round(a.gross / a.workUnits) : 0, // ✅ 평균 단가(공수당)
       commission,
       commissionRule: label,
       advance: 0,
@@ -328,7 +334,12 @@ export async function GET(req: Request) {
       foremanPayoutTotal: 0,
       memberCount: 0,
       memberIds: [],
-      status: a.gross > 0 ? (settledWorkerIds.has(String(workerId)) ? "SETTLED" : "READY") : "UNSETTLED",
+      status:
+        a.gross > 0
+          ? settledWorkerIds.has(String(workerId))
+            ? "SETTLED"
+            : "READY"
+          : "UNSETTLED",
       settlementBatchId: batchId,
     })
   }

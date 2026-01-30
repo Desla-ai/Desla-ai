@@ -155,16 +155,15 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     workerName: string
     role: string
     attendanceDays: number
-    attendanceHours: number
     unitPrice: number
     calculatedAmount: number
     adjustment: number
     finalAmount: number
-    status: "미정산" | "금액확정"
+    status: "확정대기" | "금액확정"
   }[]>([])
   const [settlementDateRange, setSettlementDateRange] = useState({ start: "", end: "" })
 
-  // 당일 정산: 일당 수정(draft) + 저장 상태
+  // 당일 정산: 공수당(단가) 수정(draft) + 저장 상태
   const [dailyWageDraftByWorkerId, setDailyWageDraftByWorkerId] = useState<Record<string, number>>({})
   const [dailyWageSavedByWorkerId, setDailyWageSavedByWorkerId] = useState<Record<string, number>>({})
   const [savingRowId, setSavingRowId] = useState<string | null>(null)
@@ -192,6 +191,13 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
   // ✅ 디바운스 타이머(행별)
   const wageDebounceRef = useMemo(() => new Map<string, any>(), [])
 
+  useEffect(() => {
+    return () => {
+      wageDebounceRef.forEach((t) => clearTimeout(t))
+      wageDebounceRef.clear()
+    }
+  }, [wageDebounceRef])
+
   const getTodayLocalStr = () => {
     const d = new Date()
     const y = d.getFullYear()
@@ -202,6 +208,10 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
 
   // 당일 정산 날짜: 기본은 오늘, 편집 모드에서만 변경
   const [workDate, setWorkDate] = useState<string>(() => getTodayLocalStr())
+
+  const [workUnitsDraftByWorkerId, setWorkUnitsDraftByWorkerId] = useState<Record<string, number>>({})
+  const [workUnitsSavedByWorkerId, setWorkUnitsSavedByWorkerId] = useState<Record<string, number>>({})
+
   // ✅ 당일정산 rows 강제 재조회 트리거
   const [dailyRowsReloadKey, setDailyRowsReloadKey] = useState(0)
   const [isEditDateMode, setIsEditDateMode] = useState(false)
@@ -219,6 +229,20 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     return diffDays >= 0 && diffDays <= n
   }
 
+  function kstDateString(d: Date = new Date()) {
+    const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
+    return kst.toISOString().slice(0, 10) // YYYY-MM-DD
+  }
+
+
+
+  const getWorkUnits = (workerId: string) => {
+    return (
+      workUnitsDraftByWorkerId[workerId] ??
+      workUnitsSavedByWorkerId[workerId] ??
+      1.0
+    )
+  }
 
 
 
@@ -231,46 +255,60 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     )
   }
 
-  const handleSaveDailyWageRow = async (workerId: string) => {
-    const wage = getDailyWage(workerId)
-
-    try {
-      setSavingRowId(workerId)
-
-      const res = await fetch("/api/daily-settlements", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          siteId: site?.id,
-          workerId,
-          workDate,     // ✅ 오늘 기본 + 편집 날짜
-          dailyWage: wage,
-        }),
-      })
-
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json?.error ?? "저장 실패")
-
-      // 저장값 확정(응답 row 기준으로 반영)
-      setDailyWageSavedByWorkerId((prev) => ({ ...prev, [workerId]: wage }))
-
-      // draft 제거
-      setDailyWageDraftByWorkerId((prev) => {
-        const next = { ...prev }
-        delete next[workerId]
-        return next
-      })
-
-      toast.success("일당이 저장되었습니다")
-    } catch (e: any) {
-      toast.error(e?.message ?? "저장에 실패했습니다")
-    } finally {
-      setSavingRowId(null)
-    }
+  type DailySettlementRow = {
+    id: string
+    site_id: string
+    worker_id: string
+    work_date: string
+    daily_wage: number
+    work_units: number | null
+    locked: boolean
+    created_at: string
+    updated_at: string
   }
 
+  const applyDailySettlementRow = (row: DailySettlementRow) => {
+    const workerId = String(row.worker_id)
+    setDailyWageSavedByWorkerId((p) => ({ ...p, [workerId]: Number(row.daily_wage ?? 0) }))
+    setWorkUnitsSavedByWorkerId((p) => ({ ...p, [workerId]: Number(row.work_units ?? 1.0) }))
+    setDailyLockedByWorkerId((p) => ({ ...p, [workerId]: Boolean(row.locked) }))
 
+    // 서버 진실 row를 반영했으니 draft는 제거(안전)
+    setDailyWageDraftByWorkerId((p) => {
+      if (!(workerId in p)) return p
+      const n = { ...p }
+      delete n[workerId]
+      return n
+    })
+    setWorkUnitsDraftByWorkerId((p) => {
+      if (!(workerId in p)) return p
+      const n = { ...p }
+      delete n[workerId]
+      return n
+    })
+  }
 
+  const putDailySettlement = async (payload: {
+    siteId: string
+    workerId: string
+    workDate: string
+    dailyWage?: number
+    workUnits?: number
+    locked?: boolean
+  }) => {
+    const res = await fetch("/api/daily-settlements", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+
+    const json = await res.json().catch(() => ({} as any))
+    if (!res.ok) throw new Error(json?.error ?? "저장 실패")
+
+    const row = json?.row as DailySettlementRow | undefined
+    if (!row) throw new Error("서버 응답(row)이 없습니다.")
+    return row
+  }
 
   // Get global pool (workers with status "출근" and not assigned)
   const globalPoolWorkers = useMemo(() => {
@@ -327,7 +365,10 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
   ])
 
 
-  const totalDailyWage = uniqueWorkers.reduce((sum, w) => sum + getDailyWage(w.id), 0)
+  const totalAmount = displayWorkers.reduce(
+    (sum, w) => sum + getDailyWage(w.id) * getWorkUnits(w.id),
+    0
+  )
 
 
 
@@ -365,11 +406,16 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
         const wageMap: Record<string, number> = {}
         const lockedMap: Record<string, boolean> = {}
 
+        const unitsMap: Record<string, number> = {}
+
         for (const r of rows) {
           wageMap[r.worker_id] = r.daily_wage
+          unitsMap[r.worker_id] = Number(r.work_units ?? 1.0)
           lockedMap[r.worker_id] = Boolean(r.locked)
         }
 
+        setWorkUnitsSavedByWorkerId(unitsMap)
+        setWorkUnitsDraftByWorkerId({})
         setDailyWageSavedByWorkerId(wageMap)
         setDailyLockedByWorkerId(lockedMap)
         setRecordedWorkerIdsForDate(
@@ -498,10 +544,10 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
 
     // Open date range dialog
     setFixedDateWorkerIds([draggedWorker.id])
-    setFixedStartDate(new Date().toISOString().split("T")[0])
-    setFixedEndDate(
-      new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0]
-    )
+    setFixedStartDate(kstDateString())
+    const end = new Date()
+    end.setDate(end.getDate() + 30)
+    setFixedEndDate(kstDateString(end))
     setFixedDateDialogOpen(true)
     setDraggedWorker(null)
   }
@@ -589,10 +635,10 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     }
 
     setFixedDateWorkerIds(selectedPoolWorkerIds)
-    setFixedStartDate(new Date().toISOString().split("T")[0])
-    setFixedEndDate(
-      new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0]
-    )
+    setFixedStartDate(kstDateString())
+    const end = new Date()
+    end.setDate(end.getDate() + 30)
+    setFixedEndDate(kstDateString(end))
     setFixedDateDialogOpen(true)
   }
 
@@ -600,15 +646,15 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
     const start = new Date()
     const end = new Date()
     end.setDate(end.getDate() + days)
-    setFixedStartDate(start.toISOString().split("T")[0])
-    setFixedEndDate(end.toISOString().split("T")[0])
+    setFixedStartDate(kstDateString(start))
+    setFixedEndDate(kstDateString(end))
   }
 
   const handleEndOfMonth = () => {
     const start = new Date()
     const end = new Date(start.getFullYear(), start.getMonth() + 1, 0)
-    setFixedStartDate(start.toISOString().split("T")[0])
-    setFixedEndDate(end.toISOString().split("T")[0])
+    setFixedStartDate(kstDateString(start))
+    setFixedEndDate(kstDateString(end))
   }
 
   const handleNextDay = async () => {
@@ -700,7 +746,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
 
     try {
       const start = settlementDateRange?.start || site.startDate
-      const end = settlementDateRange?.end || new Date().toISOString().split("T")[0]
+      const end = settlementDateRange?.end || kstDateString()
 
       const res = await fetch(
         `/api/settlements/accumulated?siteId=${encodeURIComponent(site.id)}&start=${encodeURIComponent(
@@ -1227,7 +1273,8 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                       <TableHead className="min-w-[100px]">이름</TableHead>
                       <TableHead className="min-w-[80px]">역할</TableHead>
                       <TableHead className="min-w-[80px]">배치 유형</TableHead>
-                      <TableHead className="min-w-[100px] text-right">일당</TableHead>
+                      <TableHead className="min-w-[140px] text-right">공수</TableHead>
+                      <TableHead className="min-w-[100px] text-right">공수당(단가)</TableHead>
                       <TableHead className="w-[120px] text-right">금액확정</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -1254,6 +1301,98 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                             )
                           })()}
                         </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 px-2 bg-transparent"
+                              disabled={Boolean(dailyLockedByWorkerId[worker.id])}
+                              onClick={async () => {
+                                if (dailyLockedByWorkerId[worker.id]) return
+                                const next = Math.max(0, getWorkUnits(worker.id) - 0.5)
+
+                                // draft 반영(즉시 UI 반영)
+                                setWorkUnitsDraftByWorkerId((p) => ({ ...p, [worker.id]: next }))
+
+                                // ✅ 즉시 저장
+                                try {
+                                  setAutoSavingRowIds((p) => ({ ...p, [worker.id]: true }))
+                                  setAutoSaveErrorByWorkerId((p) => {
+                                    const n = { ...p }; delete n[worker.id]; return n
+                                  })
+
+                                  const row = await putDailySettlement({
+                                    siteId: site!.id,
+                                    workerId: worker.id,
+                                    workDate,
+                                    dailyWage: getDailyWage(worker.id),
+                                    workUnits: next,
+                                  })
+                                  applyDailySettlementRow(row)
+
+                                } catch (e: any) {
+                                  setAutoSaveErrorByWorkerId((p) => ({ ...p, [worker.id]: e?.message ?? "공수 저장 실패" }))
+                                } finally {
+                                  setAutoSavingRowIds((p) => ({ ...p, [worker.id]: false }))
+                                }
+                              }}
+                            >
+                              -0.5
+                            </Button>
+
+                            <div className="w-[56px] text-right tabular-nums">
+                              {getWorkUnits(worker.id).toFixed(1)}
+                            </div>
+
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 px-2 bg-transparent"
+                              disabled={Boolean(dailyLockedByWorkerId[worker.id])}
+                              onClick={async () => {
+                                if (dailyLockedByWorkerId[worker.id]) return
+                                const next = getWorkUnits(worker.id) + 0.5
+
+                                setWorkUnitsDraftByWorkerId((p) => ({ ...p, [worker.id]: next }))
+
+                                try {
+                                  setAutoSavingRowIds((p) => ({ ...p, [worker.id]: true }))
+                                  setAutoSaveErrorByWorkerId((p) => {
+                                    const n = { ...p }; delete n[worker.id]; return n
+                                  })
+
+                                  const row = await putDailySettlement({
+                                    siteId: site!.id,
+                                    workerId: worker.id,
+                                    workDate,
+                                    dailyWage: getDailyWage(worker.id),
+                                    workUnits: next,
+                                  })
+                                  applyDailySettlementRow(row)
+
+                                } catch (e: any) {
+                                  setAutoSaveErrorByWorkerId((p) => ({ ...p, [worker.id]: e?.message ?? "공수 저장 실패" }))
+                                } finally {
+                                  setAutoSavingRowIds((p) => ({ ...p, [worker.id]: false }))
+                                }
+                              }}
+                            >
+                              +0.5
+                            </Button>
+                          </div>
+
+                          <div className="mt-1 flex justify-end">
+                            {autoSavingRowIds[worker.id] ? (
+                              <span className="text-[10px] text-muted-foreground">저장중…</span>
+                            ) : autoSaveErrorByWorkerId[worker.id] ? (
+                              <span className="text-[10px] text-destructive">저장 실패</span>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground">&nbsp;</span>
+                            )}
+                          </div>
+                        </TableCell>
+
                         <TableCell className="text-right">
                           <Input
                             type="number"
@@ -1282,25 +1421,15 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                                     return n
                                   })
 
-                                  const res = await fetch("/api/daily-settlements", {
-                                    method: "PUT",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                      siteId: site?.id,
-                                      workerId: worker.id,
-                                      workDate,
-                                      dailyWage: next,
-                                    }),
+                                  const row = await putDailySettlement({
+                                    siteId: site!.id,
+                                    workerId: worker.id,
+                                    workDate,
+                                    dailyWage: next,                 // 너가 이미 바꾼 부분
+                                    workUnits: getWorkUnits(worker.id),
                                   })
-                                  const json = await res.json().catch(() => ({}))
-                                  if (!res.ok) throw new Error(json?.error ?? "자동 저장 실패")
+                                  applyDailySettlementRow(row)
 
-                                  setDailyWageSavedByWorkerId((prev) => ({ ...prev, [worker.id]: next }))
-                                  setDailyWageDraftByWorkerId((prev) => {
-                                    const n = { ...prev }
-                                    delete n[worker.id]
-                                    return n
-                                  })
                                 } catch (err: any) {
                                   setAutoSaveErrorByWorkerId((p) => ({ ...p, [worker.id]: err?.message ?? "자동 저장 실패" }))
                                 } finally {
@@ -1348,21 +1477,15 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                                 const wage = getDailyWage(worker.id)
                                 try {
                                   setSavingRowId(worker.id)
-                                  const res = await fetch("/api/daily-settlements", {
-                                    method: "PUT",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                      siteId: site?.id,
-                                      workerId: worker.id,
-                                      workDate,
-                                      dailyWage: wage,
-                                      locked: true,
-                                    }),
+                                  const row = await putDailySettlement({
+                                    siteId: site!.id,
+                                    workerId: worker.id,
+                                    workDate,
+                                    dailyWage: getDailyWage(worker.id),
+                                    workUnits: getWorkUnits(worker.id),
+                                    locked: true,
                                   })
-                                  const json = await res.json().catch(() => ({}))
-                                  if (!res.ok) throw new Error(json?.error ?? "금액확정 실패")
-
-                                  setDailyLockedByWorkerId((p) => ({ ...p, [worker.id]: true }))
+                                  applyDailySettlementRow(row)
                                   toast.success("금액확정 완료")
                                 } catch (e: any) {
                                   toast.error(e?.message ?? "금액확정 실패")
@@ -1385,10 +1508,10 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
               <div className="shrink-0 border-t border-border bg-muted/30 px-4 py-3">
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-muted-foreground">
-                    총 {dailyAssignedWorkers.length + fixedAssignedWorkers.length}명
+                    총 {displayWorkers.length}명
                   </span>
                   <span className="text-sm font-semibold">
-                    합계: {formatKoreanMoney(totalDailyWage)}
+                    합계: {formatKoreanMoney(totalAmount)}
                   </span>
                 </div>
               </div>
@@ -1451,7 +1574,6 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                       <Skeleton className="h-10 w-24" />
                       <Skeleton className="h-10 w-20" />
                       <Skeleton className="h-10 w-16" />
-                      <Skeleton className="h-10 w-16" />
                       <Skeleton className="h-10 w-24" />
                       <Skeleton className="h-10 w-24" />
                       <Skeleton className="h-10 w-24" />
@@ -1484,8 +1606,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                     <TableRow>
                       <TableHead className="min-w-[100px]">이름</TableHead>
                       <TableHead className="min-w-[80px]">역할</TableHead>
-                      <TableHead className="min-w-[60px] text-center">출근일</TableHead>
-                      <TableHead className="min-w-[60px] text-center">시간</TableHead>
+                      <TableHead className="min-w-[60px] text-center">공수</TableHead>
                       <TableHead className="min-w-[100px] text-right">단가</TableHead>
                       <TableHead className="min-w-[100px] text-right">계산금액</TableHead>
                       <TableHead className="min-w-[120px] text-right">최종금액</TableHead>
@@ -1499,8 +1620,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                         <TableCell>
                           <Badge variant="outline">{row.role}</Badge>
                         </TableCell>
-                        <TableCell className="text-center">{row.attendanceDays}일</TableCell>
-                        <TableCell className="text-center">{row.attendanceHours}h</TableCell>
+                        <TableCell className="text-center">{row.attendanceDays.toFixed(1)}공수</TableCell>
                         <TableCell className="text-right tabular-nums">
                           {formatKoreanMoney(row.unitPrice)}
                         </TableCell>
@@ -1828,23 +1948,14 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                 if (!workerId) return
                 try {
                   setSavingRowId(workerId)
-                  const res = await fetch("/api/daily-settlements", {
-                    method: "PUT",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      siteId: site?.id,
-                      workerId,
-                      workDate,
-                      locked: false,
-                      // P0에서는 사유는 서버에 아직 안 넣어도 됨(나중에 record_events로 확장)
-                      // reason: unlockReason,
-                    }),
+                  const row = await putDailySettlement({
+                    siteId: site!.id,
+                    workerId,
+                    workDate,
+                    locked: false,
                   })
-                  const json = await res.json().catch(() => ({}))
-                  if (!res.ok) throw new Error(json?.error ?? "해제 실패")
-
-                  setDailyLockedByWorkerId((p) => ({ ...p, [workerId]: false }))
-                  toast.success("확정 해제 완료 (배차완료로 복귀)")
+                  applyDailySettlementRow(row)
+                  toast.success("확정 해제 완료")
                   setUnlockDialogOpen(false)
                 } catch (e: any) {
                   toast.error(e?.message ?? "해제 실패")
@@ -1897,23 +2008,16 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                 // A 방식: 실패 스킵, 계속 진행
                 for (const w of targets) {
                   try {
-                    const wage = getDailyWage(w.id)
-                    const res = await fetch("/api/daily-settlements", {
-                      method: "PUT",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        siteId: site?.id,
-                        workerId: w.id,
-                        workDate,
-                        dailyWage: wage,
-                        locked: true,
-                      }),
+                    const row = await putDailySettlement({
+                      siteId: site!.id,
+                      workerId: w.id,
+                      workDate,
+                      dailyWage: getDailyWage(w.id),
+                      workUnits: getWorkUnits(w.id),
+                      locked: true,
                     })
-                    const json = await res.json().catch(() => ({}))
-                    if (!res.ok) throw new Error(json?.error ?? "확정 실패")
-
+                    applyDailySettlementRow(row)
                     ok += 1
-                    setDailyLockedByWorkerId((p) => ({ ...p, [w.id]: true }))
                   } catch (e: any) {
                     failed.push({ name: w.name, reason: e?.message ?? "확정 실패" })
                   }
