@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, useEffect, useCallback } from "react"
+import { useState, useMemo, useEffect, useCallback, Dispatch, SetStateAction, useRef } from "react"
 import { AppShell } from "@/components/layout/app-shell"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -138,6 +138,7 @@ interface PayableItem {
   amount: number
   status: "ACCUMULATED" | "PAID"
   createdAt: string
+  settlementBatchId?: string | null
 }
 
 interface PayoutHistory {
@@ -184,6 +185,8 @@ export default function SettlementPage() {
     new Date().toISOString().slice(0, 7)
   )
 
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null)
+
   // ✅ 월말 일괄지급 여부: ON이면 month(1개), OFF면 start/end(2개)
   const [monthlyPayoutEnabled, setMonthlyPayoutEnabled] = useState<boolean>(true)
   const [customRange, setCustomRange] = useState<{ start: string; end: string }>(() => {
@@ -216,15 +219,19 @@ export default function SettlementPage() {
         const json = await res.json().catch(() => ({}))
         if (!res.ok) throw new Error(json?.error ?? "설정 로드 실패")
 
-        setMonthlyPayoutEnabled(Boolean(json?.monthlyPayoutEnabled))
-        const next = Boolean(json?.monthlyPayoutEnabled)
-        setMonthlyPayoutEnabled(next)
+        const nextMonthly = Boolean(json?.monthlyPayoutEnabled)
+        setMonthlyPayoutEnabled(nextMonthly)
+
         const today = kstTodayYmd()
-        setCustomRange({ start: today, end: today })
-        if (next) setSelectedPeriod(kstTodayYmd().slice(0, 7))
-        // 커스텀 기간도 마지막 사용값을 저장할 거면 여기서 함께 로드 가능
+        if (nextMonthly) {
+          setSelectedPeriod(today.slice(0, 7))
+          // monthly면 customRange를 굳이 건드리지 말기(튐 방지)
+        } else {
+          setCustomRange({ start: today, end: today })
+          // custom이면 selectedPeriod 굳이 건드리지 말기(튐 방지)
+        }
       } catch {
-        // 실패 시 기본 true 유지
+        // 실패 시 기본 유지
       }
     }
     loadSitePrefs()
@@ -367,6 +374,8 @@ export default function SettlementPage() {
                     siteName={selectedSite?.name || ""}
                     period={selectedPeriod}
                     range={computedRange}
+                    activeBatchId={activeBatchId}
+                    setActiveBatchId={setActiveBatchId}
                   />
                 </TabsContent>
 
@@ -385,6 +394,8 @@ export default function SettlementPage() {
                     siteName={selectedSite?.name || ""}
                     period={selectedPeriod}
                     range={computedRange}
+                    activeBatchId={activeBatchId}
+                    setActiveBatchId={setActiveBatchId}
                   />
                 </TabsContent>
 
@@ -931,11 +942,15 @@ function WorkforceSettlementTab({
   siteName,
   period,
   range,
+  activeBatchId,
+  setActiveBatchId,
 }: {
   siteId: string | null
   siteName: string
   period: string
   range: { start: string; end: string }
+  activeBatchId: string | null
+  setActiveBatchId: Dispatch<SetStateAction<string | null>>
 }) {
   const [loading, setLoading] = useState(false)
   const [settlements, setSettlements] = useState<SettlementTarget[]>([])
@@ -963,6 +978,9 @@ function WorkforceSettlementTab({
   // ✅ 추가분(하루) 생성 다이얼로그
   const [adjustmentDialogOpen, setAdjustmentDialogOpen] = useState(false)
 
+  const latestReqRef = useRef(0)
+  const lastKeyRef = useRef<string>("")
+
   const [pendingSettlePayload, setPendingSettlePayload] = useState<{
     siteId: string
     periodStart: string
@@ -980,32 +998,61 @@ function WorkforceSettlementTab({
 
 
 
-  const loadSettlements = async () => {
+  const loadSettlements = async (opts?: { batchId?: string | null }) => {
     if (!siteId) return
-    setLoading(true)
 
-    // ✅ snapshot: 로딩 중 range 변경되더라도 이 호출은 고정된 기간으로 수행
+    // ✅ 이번 호출의 snapshot (range가 중간에 바뀌어도 이 호출은 고정)
     const start = range.start
     const end = range.end
 
+    // opts.batchId가 최우선, 없으면 현재 activeBatchId(props) 사용
+    const batchId = opts?.batchId ?? activeBatchId ?? null
+
+    // ✅ 요청 키(같은 키면 중복 호출 억제 가능)
+    const key = `${siteId}|${start}|${end}|${batchId ?? ""}`
+
+    setLoading(true)
+
+    // ✅ 레이스 방지용 request id
+    const reqId = ++latestReqRef.current
+    lastKeyRef.current = key
+
     try {
-      const res = await fetch(
-        `/api/settlements/workforce?siteId=${encodeURIComponent(siteId)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
-      )
+      const qs = new URLSearchParams({ siteId, start, end })
+      if (batchId) qs.set("batchId", batchId)
+
+      const res = await fetch(`/api/settlements/workforce?${qs.toString()}`, {
+        cache: "no-store",
+      })
+
       const json = await res.json().catch(() => ({}))
+
+      // ✅ 더 최신 요청이 이미 시작됐으면(=reqId가 밀리면) 이 응답은 무시
+      if (reqId !== latestReqRef.current) return
+
       if (!res.ok) throw new Error(json?.error ?? "정산 로드 실패")
 
-      console.log("[workforce] sample", (json.settlements ?? []).slice(0, 3))
+      // ✅ 안전: 서버가 다른 배치/기간으로 응답했으면 무시 (월/일 튐 방어)
+      const serverBatchId = String(json?.settlementBatchId ?? "")
+      const serverSettlements = Array.isArray(json?.settlements) ? json.settlements : []
 
-      // ✅ DB 결과로만 렌더링(낙관적 업데이트 금지)
-      setSettlements(json.settlements ?? [])
+      // (서버는 settlementBatchId를 내려줌. batchId를 요청했는데 다르면 무시)
+      if (batchId && serverBatchId && serverBatchId !== batchId) {
+        return
+      }
+
+      // ✅ DB 결과만 렌더링(낙관적 업데이트 금지)
+      setSettlements(serverSettlements)
     } catch (e: any) {
+      if (reqId !== latestReqRef.current) return
       toast.error(e?.message ?? "정산 데이터를 불러오지 못했습니다")
       setSettlements([])
     } finally {
-      setLoading(false)
+      if (reqId === latestReqRef.current) setLoading(false)
     }
   }
+
+
 
 
 
@@ -1300,9 +1347,13 @@ function WorkforceSettlementTab({
 
 
       toast.success(`정산 확정 완료 (${selectedLabel})`)
+
+      const newBatchId = String(json?.batchId ?? "")
+      if (newBatchId) setActiveBatchId(newBatchId)
+
       setCompleteScopeDialogOpen(false)
       setSelectedIds([])
-      await loadSettlements()
+      await loadSettlements({ batchId: newBatchId || null })
     } catch (e: any) {
       toast.error(e?.message ?? "정산확정 실패")
     } finally {
@@ -1310,7 +1361,7 @@ function WorkforceSettlementTab({
     }
   }
 
-    const handleCreateAdjustment = async () => {
+  const handleCreateAdjustment = async () => {
     if (!pendingSettlePayload) return
 
     setIsCompletingScope(true)
@@ -1339,11 +1390,14 @@ function WorkforceSettlementTab({
 
       toast.success(`추가분 정산 생성 완료 (${pendingSettlePayload.selectedLabel})`)
 
+      const newBatchId = String(json?.batchId ?? "")
+      if (newBatchId) setActiveBatchId(newBatchId)
+
       setAdjustmentDialogOpen(false)
       setPendingSettlePayload(null)
       setCompleteScopeDialogOpen(false)
       setSelectedIds([])
-      await loadSettlements()
+      await loadSettlements({ batchId: newBatchId || null })
     } catch (e: any) {
       toast.error(e?.message ?? "추가분 정산 생성 실패")
     } finally {
@@ -1437,7 +1491,7 @@ function WorkforceSettlementTab({
             <Button
               variant="outline"
               size="sm"
-              onClick={loadSettlements}
+              onClick={() => loadSettlements()}
               disabled={loading}
               className="bg-transparent"
             >
@@ -2063,12 +2117,17 @@ function PayoutManagementTab({
   siteName,
   period,
   range,
+  activeBatchId,
+  setActiveBatchId,
 }: {
   siteId: string | null
   siteName: string
   period: string
   range: { start: string; end: string }
+  activeBatchId: string | null
+  setActiveBatchId: Dispatch<SetStateAction<string | null>>
 }) {
+
   const [activeSubTab, setActiveSubTab] = useState("pending")
   const [loading, setLoading] = useState(false)
   const [payables, setPayables] = useState<PayableItem[]>([])
@@ -2205,6 +2264,9 @@ function PayoutManagementTab({
       if (!payRes.ok) throw new Error(payJson?.error ?? "지급 완료 처리 실패")
 
       toast.success("지급 완료 처리되었습니다")
+      const paidBatchId = String(selected?.[0]?.settlementBatchId ?? "")
+      if (paidBatchId) setActiveBatchId(paidBatchId)
+
       setSelectedPayableIds([])
       setPayoutDialogOpen(false)
       setPayoutMemo("")

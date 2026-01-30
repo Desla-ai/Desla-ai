@@ -10,6 +10,65 @@ function isYmd(v: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v)
 }
 
+async function getNormalBatchOrCreate(params: {
+  officeId: string
+  siteId: string
+  start: string
+  end: string
+  userId?: string | null
+}) {
+  const { officeId, siteId, start, end, userId } = params
+
+  const { data: rows, error } = await supabaseAdmin
+    .from("settlement_batches")
+    .select("id, status, site_id, period_start, period_end, created_at, batch_kind, adjustment_seq")
+    .eq("office_id", officeId)
+    .eq("site_id", siteId)
+    .eq("period_start", start)
+    .eq("period_end", end)
+    .eq("batch_kind", "NORMAL")
+    .eq("adjustment_seq", 0)
+    .order("created_at", { ascending: false })
+    .limit(1)
+
+  if (error) return { error }
+  const found = rows?.[0] ?? null
+  if (found?.id) return { batch: found }
+
+  const { error: insErr } = await supabaseAdmin.from("settlement_batches").insert([
+    {
+      office_id: officeId,
+      site_id: siteId,
+      period_start: start,
+      period_end: end,
+      status: "DRAFT",
+      created_by_user_id: userId ?? null,
+      batch_kind: "NORMAL",
+      adjustment_seq: 0,
+    },
+  ])
+
+  if (insErr) return { error: insErr }
+
+  const { data: rows2, error: findErr2 } = await supabaseAdmin
+    .from("settlement_batches")
+    .select("id, status, site_id, period_start, period_end, created_at, batch_kind, adjustment_seq")
+    .eq("office_id", officeId)
+    .eq("site_id", siteId)
+    .eq("period_start", start)
+    .eq("period_end", end)
+    .eq("batch_kind", "NORMAL")
+    .eq("adjustment_seq", 0)
+    .order("created_at", { ascending: false })
+    .limit(1)
+
+  if (findErr2) return { error: findErr2 }
+  const created = rows2?.[0] ?? null
+  if (!created?.id) return { error: { message: "Failed to create settlement batch" } as any }
+
+  return { batch: created }
+}
+
 export async function POST(req: Request) {
   const cookieStore = await cookies()
   const session = verifySessionCookie(cookieStore.get(SESSION_COOKIE_NAME)?.value)
@@ -24,12 +83,10 @@ export async function POST(req: Request) {
   const method = String(body?.method ?? "BANK").trim()
   const memo = String(body?.memo ?? "").trim()
 
-  // ✅ 개별지급: 선택한 payout_items.id 리스트
   const payableItemIds = Array.isArray(body?.payableItemIds)
     ? (body.payableItemIds as any[]).map((x) => String(x)).filter(Boolean)
     : []
 
-  // optionally support batchId from client
   const batchIdFromBody = String(body?.settlementBatchId ?? body?.batchId ?? "").trim()
 
   if (!siteId) return jsonError("siteId is required", 400)
@@ -37,74 +94,74 @@ export async function POST(req: Request) {
   if (!isYmd(start) || !isYmd(end)) return jsonError("start/end must be YYYY-MM-DD", 400)
   if (start > end) return jsonError("start must be <= end", 400)
 
-  // ✅ 실수 방지: 선택 없으면 전체지급이 되어버리므로 금지
   if (payableItemIds.length === 0) {
     return jsonError("payableItemIds is required for individual payout", 400)
   }
 
-  // 0) get-or-create batch
-  let batchId = batchIdFromBody || ""
-  let batchStatus: string | null = null
+  // 0) Resolve settlement_batch_id from payableItemIds (source of truth)
+  //    - 절대 기간(periodStart/End)로 batch를 먼저 고르지 말 것
+  //    - 선택한 payout_items가 속한 배치로 payout을 생성해야 함
+  const { data: chosenItems, error: chosenErr } = await supabaseAdmin
+    .from("payout_items")
+    .select("id, settlement_batch_id, status, payout_id, site_id, period_start, period_end")
+    .eq("office_id", s.officeId)
+    .eq("site_id", siteId)
+    .in("id", payableItemIds)
 
-  if (batchId) {
-    const { data: b, error } = await supabaseAdmin
-      .from("settlement_batches")
-      .select("id, status, site_id, period_start, period_end")
-      .eq("office_id", s.officeId)
-      .eq("id", batchId)
-      .maybeSingle()
+  if (chosenErr) return jsonError(chosenErr.message, 500)
 
-    if (error) return jsonError(error.message, 500)
-    if (!b?.id) return jsonError("Invalid settlementBatchId", 400)
-
-    if (String(b.site_id) !== siteId) return jsonError("settlementBatchId site mismatch", 400)
-    if (String(b.period_start) !== start || String(b.period_end) !== end) {
-      return jsonError("settlementBatchId period mismatch", 400)
-    }
-
-    batchStatus = b.status
-  } else {
-    const { data: b, error } = await supabaseAdmin
-      .from("settlement_batches")
-      .select("id, status")
-      .eq("office_id", s.officeId)
-      .eq("site_id", siteId)
-      .eq("period_start", start)
-      .eq("period_end", end)
-      .maybeSingle()
-
-    if (error) return jsonError(error.message, 500)
-
-    if (b?.id) {
-      batchId = b.id
-      batchStatus = b.status
-    } else {
-      const { data: created, error: insErr } = await supabaseAdmin
-        .from("settlement_batches")
-        .insert([
-          {
-            office_id: s.officeId,
-            site_id: siteId,
-            period_start: start,
-            period_end: end,
-            status: "DRAFT",
-            created_by_user_id: s.userId,
-          },
-        ])
-        .select("id, status")
-        .single()
-
-      if (insErr) return jsonError(insErr.message, 500)
-      batchId = created.id
-      batchStatus = created.status
-    }
+  if (!chosenItems || chosenItems.length !== payableItemIds.length) {
+    return jsonError(
+      `Invalid payableItemIds. requested=${payableItemIds.length}, found=${chosenItems?.length ?? 0}`,
+      400
+    )
   }
+
+  // 0-1) all selected items must belong to the same settlement_batch_id
+  const batchIdSet = new Set<string>()
+  for (const it of chosenItems) {
+    const bid = String(it.settlement_batch_id ?? "")
+    if (!bid) return jsonError("Selected items must have settlement_batch_id", 400)
+    batchIdSet.add(bid)
+  }
+  if (batchIdSet.size !== 1) {
+    return jsonError("Selected items span multiple settlement batches. Select items from one batch only.", 400)
+  }
+
+  const batchId = Array.from(batchIdSet)[0]
+
+  // 0-2) server-side eligibility check (defensive)
+  const ineligible = chosenItems.filter((it: any) => it.status !== "ACCUMULATED" || it.payout_id != null)
+  if (ineligible.length > 0) {
+    return jsonError("Some items are not eligible (must be ACCUMULATED and not linked).", 409)
+  }
+
+  // 0-3) load batch status
+  const { data: batchRows, error: bErr } = await supabaseAdmin
+    .from("settlement_batches")
+    .select("id, status, site_id, period_start, period_end, batch_kind, adjustment_seq")
+    .eq("office_id", s.officeId)
+    .eq("id", batchId)
+    .limit(1)
+
+  if (bErr) return jsonError(bErr.message, 500)
+  const b = batchRows?.[0] ?? null
+  if (!b?.id) return jsonError("Invalid settlement batch for selected items", 400)
+
+  // sanity: ensure batch matches site/period from request (optional but helpful)
+  if (String(b.site_id) !== siteId) return jsonError("settlement batch site mismatch", 400)
+  if (String(b.period_start) !== start || String(b.period_end) !== end) {
+    return jsonError("settlement batch period mismatch", 400)
+  }
+
+  const batchStatus = b.status as string
 
   // PAID 배치는 신규 지급 생성/링크 금지(정책 유지)
   if (batchStatus === "PAID") return jsonError("This settlement batch is already PAID", 409)
 
-  // 1) payout 생성
-  const { data: payout, error: pErr } = await supabaseAdmin
+
+  // 1) payout 생성 (단건 가정 제거: insert 후 재조회 없이 returning만 쓰되, 여기서는 id만 필요)
+  const { data: payoutRows, error: pErr } = await supabaseAdmin
     .from("payouts")
     .insert([
       {
@@ -120,12 +177,14 @@ export async function POST(req: Request) {
       },
     ])
     .select("id, created_at")
-    .single()
+    .order("created_at", { ascending: false })
+    .limit(1)
 
   if (pErr) return jsonError(pErr.message, 500)
+  const payout = payoutRows?.[0] ?? null
+  if (!payout?.id) return jsonError("Failed to create payout", 500)
 
-  // 2) ✅ 선택된 payout_items만 이 payout에 연결
-  //    - office/site/batch/status/payout_id 조건을 만족해야 함
+  // 2) 선택된 payout_items만 이 payout에 연결
   const { data: selectedItems, error: selErr } = await supabaseAdmin
     .from("payout_items")
     .select("id, status, payout_id")
@@ -140,7 +199,6 @@ export async function POST(req: Request) {
     .filter((it: any) => it.status === "ACCUMULATED" && it.payout_id == null)
     .map((it: any) => it.id)
 
-  // “내가 체크한 것만 지급” 보장을 위해, 일부라도 조건 불일치면 실패 처리
   if (eligibleIds.length !== payableItemIds.length) {
     return jsonError(
       `Some items are not eligible (must be ACCUMULATED and not linked). requested=${payableItemIds.length}, eligible=${eligibleIds.length}`,
@@ -174,7 +232,7 @@ export async function GET(req: Request) {
   if ((start && !isYmd(start)) || (end && !isYmd(end))) return jsonError("start/end must be YYYY-MM-DD", 400)
   if (start && end && start > end) return jsonError("start must be <= end", 400)
 
-  // payables: 현 기간 배치들의 payout_id NULL + ACCUMULATED
+  // payables: payout_id NULL + ACCUMULATED
   let qPayables = supabaseAdmin
     .from("payout_items")
     .select(
@@ -209,9 +267,7 @@ export async function GET(req: Request) {
 
   const payoutIds = (payouts ?? []).map((x: any) => x.id).filter(Boolean)
 
-  const paidByUserIds = Array.from(
-    new Set((payouts ?? []).map((p: any) => p.paid_by_user_id).filter(Boolean))
-  ) as string[]
+  const paidByUserIds = Array.from(new Set((payouts ?? []).map((p: any) => p.paid_by_user_id).filter(Boolean))) as string[]
 
   const userNameById = new Map<string, string>()
   if (paidByUserIds.length > 0) {
