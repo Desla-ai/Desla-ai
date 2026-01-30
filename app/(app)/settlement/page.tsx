@@ -218,6 +218,11 @@ export default function SettlementPage() {
         if (!res.ok) throw new Error(json?.error ?? "설정 로드 실패")
 
         setMonthlyPayoutEnabled(Boolean(json?.monthlyPayoutEnabled))
+        const next = Boolean(json?.monthlyPayoutEnabled)
+        setMonthlyPayoutEnabled(next)
+        const today = kstTodayYmd()
+        setCustomRange({ start: today, end: today })
+        if (next) setSelectedPeriod(kstTodayYmd().slice(0, 7))
         // 커스텀 기간도 마지막 사용값을 저장할 거면 여기서 함께 로드 가능
       } catch {
         // 실패 시 기본 true 유지
@@ -248,17 +253,6 @@ export default function SettlementPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex items-center gap-2">
-              <Label className="text-sm text-muted-foreground">월말 일괄지급:</Label>
-              <Button
-                size="sm"
-                variant={monthlyPayoutEnabled ? "default" : "outline"}
-                onClick={() => setMonthlyPayoutEnabled((v) => !v)}
-              >
-                {monthlyPayoutEnabled ? "ON" : "OFF"}
-              </Button>
-            </div>
-
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-2">
                 <Label className="text-sm text-muted-foreground">기간:</Label>
@@ -357,7 +351,15 @@ export default function SettlementPage() {
               {/* 2) 컨텐츠 영역 */}
               <div className="flex-1 min-h-0 overflow-hidden">
                 <TabsContent value="config" className="h-full m-0 data-[state=inactive]:hidden">
-                  <SettlementConfigTab siteId={selectedSiteId} siteName={selectedSite?.name || ""} period={selectedPeriod} range={computedRange} />
+                  <SettlementConfigTab
+                    siteId={selectedSiteId}
+                    siteName={selectedSite?.name || ""}
+                    period={selectedPeriod}
+                    range={computedRange}
+                    monthlyPayoutEnabled={monthlyPayoutEnabled}
+                    setMonthlyPayoutEnabled={setMonthlyPayoutEnabled}
+                  />
+
                 </TabsContent>
 
                 <TabsContent value="workforce" className="h-full m-0 data-[state=inactive]:hidden">
@@ -411,17 +413,20 @@ function SettlementConfigTab({
   siteName,
   period,
   range,
+  monthlyPayoutEnabled,
+  setMonthlyPayoutEnabled,
 }: {
   siteId: string | null
   siteName: string
   period: string
   range: { start: string; end: string }
+  monthlyPayoutEnabled: boolean
+  setMonthlyPayoutEnabled: (v: boolean | ((prev: boolean) => boolean)) => void
 }) {
   const [loading, setLoading] = useState(false)
   const [rules, setRules] = useState<SettlementRule[]>([])
   const [editDialogOpen, setEditDialogOpen] = useState(false)
   const [editingRule, setEditingRule] = useState<SettlementRule | null>(null)
-  const [monthlyPayoutEnabled, setMonthlyPayoutEnabled] = useState(false)
 
   useEffect(() => {
     if (!siteId) return
@@ -528,15 +533,35 @@ function SettlementConfigTab({
           <CardContent>
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium">월말 일괄지급 (지급예정 누적)</p>
+                <p className="text-sm font-medium">월말 일괄지급</p>
                 <p className="text-xs text-muted-foreground">
-                  활성화시 정산 완료된 금액이 지급 예정에 누적됩니다
+                  활성화시 정산 기간을 달별로 고정합니다
                 </p>
               </div>
               <Button
                 variant={monthlyPayoutEnabled ? "default" : "outline"}
                 size="sm"
-                onClick={() => setMonthlyPayoutEnabled(!monthlyPayoutEnabled)}
+                onClick={async () => {
+                  if (!siteId) return
+                  const next = !monthlyPayoutEnabled
+
+                  // 1) UI 즉시 반영(전역 SoT)
+                  setMonthlyPayoutEnabled(next)
+
+                  // 2) 서버 저장 (현장별 유지)
+                  try {
+                    const res = await fetch("/api/sites/prefs", {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ siteId, monthlyPayoutEnabled: next }),
+                    })
+                    const json = await res.json().catch(() => ({}))
+                    if (!res.ok) throw new Error(json?.error ?? "설정 저장 실패")
+                    toast.success(`월말 일괄지급 ${next ? "활성" : "비활성"} 저장됨`)
+                  } catch (e: any) {
+                    toast.error(e?.message ?? "설정 저장 실패")
+                  }
+                }}
               >
                 {monthlyPayoutEnabled ? "활성" : "비활성"}
               </Button>
@@ -939,23 +964,28 @@ function WorkforceSettlementTab({
   useEffect(() => {
     if (!siteId) return
     loadSettlements()
-  }, [siteId, period])
+  }, [siteId, period, range.start, range.end])
+
 
 
   const loadSettlements = async () => {
     if (!siteId) return
     setLoading(true)
-    try {
-      const { start, end } = getMonthRange(period)
 
+    // ✅ snapshot: 로딩 중 range 변경되더라도 이 호출은 고정된 기간으로 수행
+    const start = range.start
+    const end = range.end
+
+    try {
       const res = await fetch(
-        `/api/settlements/workforce?siteId=${encodeURIComponent(siteId)}&start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`
+        `/api/settlements/workforce?siteId=${encodeURIComponent(siteId)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
       )
       const json = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(json?.error ?? "정산 로드 실패")
 
       console.log("[workforce] sample", (json.settlements ?? []).slice(0, 3))
 
+      // ✅ DB 결과로만 렌더링(낙관적 업데이트 금지)
       setSettlements(json.settlements ?? [])
     } catch (e: any) {
       toast.error(e?.message ?? "정산 데이터를 불러오지 못했습니다")
@@ -964,6 +994,7 @@ function WorkforceSettlementTab({
       setLoading(false)
     }
   }
+
 
 
   // Filtered settlements
@@ -1927,7 +1958,8 @@ function PayoutManagementTab({
   useEffect(() => {
     if (!siteId) return
     loadData()
-  }, [siteId, period])
+  }, [siteId, period, range.start, range.end])
+
 
   function formatKst(iso: string) {
     const d = new Date(iso)

@@ -121,54 +121,66 @@ export async function GET(req: Request) {
 
   if (dsErr) return jsonError(dsErr.message, 500)
 
-  // 3) settled(=ACCUMULATED & payout_id null) by batch
+  // 3) payout_items 상태 로드 (batch 기준)
+  // - SETTLED 판정: ACCUMULATED + payout_id IS NULL
+  // - PAID 숨김(Option A): status = PAID
   const { data: piRows, error: piErr } = await supabaseAdmin
     .from("payout_items")
-    .select("payee_type, payee_id, payout_id, status")
+    .select("payee_type, payee_id, payout_id, status, member_ids")
     .eq("office_id", s.officeId)
     .eq("settlement_batch_id", batchId)
-    .is("payout_id", null)
-    .eq("status", "ACCUMULATED")
+    .in("status", ["ACCUMULATED", "PAID"])
 
-  if (piErr) return jsonError(piErr.message, 500)
+  if (piErr) throw piErr
 
+  const paidKeySet = new Set<string>()
+
+  // 팀(FOREMAN) PAID 시 팀원까지 함께 숨기기 위한 확장(선택이지만 권장)
+  const paidMemberIdSet = new Set<string>()
+
+  for (const r of piRows ?? []) {
+    const key = `${r.payee_type}:${r.payee_id}`
+
+    if (r.status === "PAID") {
+      paidKeySet.add(key)
+
+      // FOREMAN의 member_ids가 있으면 팀원도 같이 숨김 처리
+      if (r.payee_type === "FOREMAN" && Array.isArray(r.member_ids)) {
+        for (const mid of r.member_ids) paidMemberIdSet.add(String(mid))
+      }
+      continue
+    }
+  }
+
+  // ✅ settled(정산완료/지급예정) = ACCUMULATED + payout_id NULL 만
   const settledWorkerIds = new Set<string>()
   const settledForemanIds = new Set<string>()
+
   for (const r of piRows ?? []) {
+    if (r.status !== "ACCUMULATED") continue
+    if (r.payout_id != null) continue
+
     if (r.payee_type === "WORKER") settledWorkerIds.add(String(r.payee_id))
     if (r.payee_type === "FOREMAN") settledForemanIds.add(String(r.payee_id))
   }
 
-  // 4) paid by batch (hide)
-  const { data: paidItems, error: paidErr } = await supabaseAdmin
-    .from("payout_items")
-    .select("payee_type, payee_id, member_ids")
-    .eq("office_id", s.officeId)
-    .eq("settlement_batch_id", batchId)
-    .eq("status", "PAID")
 
-  if (paidErr) return jsonError(paidErr.message, 500)
 
+  // 4) paid by batch (hide) — 이미 3)에서 piRows로 계산 가능하므로 중복 쿼리 제거
   const paidWorkerIds = new Set<string>()
   const paidForemanIds = new Set<string>()
 
-  for (const it of paidItems ?? []) {
-    const payeeType = String((it as any).payee_type ?? "")
-    const payeeId = String((it as any).payee_id ?? "")
-
-    if (payeeType === "WORKER") {
-      if (payeeId) paidWorkerIds.add(payeeId)
-      continue
-    }
-
-    if (payeeType === "FOREMAN") {
-      if (payeeId) paidForemanIds.add(payeeId)
-      const mids = Array.isArray((it as any).member_ids) ? (it as any).member_ids : []
-      for (const mid of mids) {
-        if (mid) paidWorkerIds.add(String(mid))
-      }
-    }
+  for (const key of paidKeySet) {
+    const [t, id] = key.split(":")
+    if (t === "WORKER") paidWorkerIds.add(id)
+    if (t === "FOREMAN") paidForemanIds.add(id)
   }
+
+  // FOREMAN의 member_ids는 3)에서 paidMemberIdSet으로 이미 확장해 둠
+  for (const mid of paidMemberIdSet) paidWorkerIds.add(mid)
+
+  // ✅ FOREMAN으로 지급완료된 팀장은 개인(PROXY)로 다시 뜨면 안 됨
+  const paidLeaderIds = new Set<string>(Array.from(paidForemanIds))
 
   // 5) workers
   const { data: workers, error: wErr } = await supabaseAdmin
@@ -278,8 +290,14 @@ export async function GET(req: Request) {
 
   // 9) worker targets
   for (const [workerId, a] of agg.entries()) {
+    // ✅ 팀장(FOREMAN) 지급완료면 개인(PROXY)로 재등장 금지
+    if (paidLeaderIds.has(String(workerId))) continue
+
     if (usedInTeam.has(workerId)) continue
     if (paidWorkerIds.has(String(workerId))) continue
+    // ✅ 팀(FOREMAN) 지급완료 시 팀원도 개인(PROXY)로 다시 뜨면 안 됨
+    // (member_ids 스냅샷이 있을 때 특히 중요)
+    if (paidMemberIdSet.has(String(workerId))) continue
 
     const w = workerById.get(workerId)
     const name = w?.name ?? "(알수없음)"

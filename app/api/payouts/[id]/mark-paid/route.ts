@@ -7,13 +7,14 @@ function jsonError(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status })
 }
 
-export async function POST(req: Request, ctx: { params: { id: string } }) {
+export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const cookieStore = await cookies()
   const session = verifySessionCookie(cookieStore.get(SESSION_COOKIE_NAME)?.value)
   if (!session) return jsonError("Unauthorized", 401)
   const s = session
 
-  const payoutId = String(ctx?.params?.id ?? "").trim()
+  const { id } = await ctx.params
+  const payoutId = String(id ?? "").trim()
   if (!payoutId) return jsonError("payoutId is required", 400)
 
   // payout 조회
