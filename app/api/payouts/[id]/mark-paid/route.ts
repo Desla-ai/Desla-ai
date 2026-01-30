@@ -29,7 +29,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!payout?.id) return jsonError("Payout not found", 404)
 
   if (payout.status === "PAID") {
-    return NextResponse.json({ ok: true, payoutId, alreadyPaid: true })
+    return NextResponse.json({ ok: true, payoutId, alreadyPaid: true, batchPaidUpdated: false })
   }
 
   const nowIso = new Date().toISOString()
@@ -52,16 +52,27 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   if (upItemsErr) return jsonError(upItemsErr.message, 500)
 
-  // batch도 PAID로 마감(있다면)
+  // ✅ 엄격 락: payout 하나라도 PAID되면 배치를 즉시 PAID로 마감
+  let batchPaidUpdated = false
+
   if (payout.settlement_batch_id) {
+    const batchId = String(payout.settlement_batch_id)
+
     const { error: upBatchErr } = await supabaseAdmin
       .from("settlement_batches")
       .update({ status: "PAID", paid_at: nowIso })
       .eq("office_id", s.officeId)
-      .eq("id", payout.settlement_batch_id)
+      .eq("id", batchId)
+      .neq("status", "PAID") // 이미 PAID면 idempotent
 
     if (upBatchErr) return jsonError(upBatchErr.message, 500)
+    batchPaidUpdated = true
   }
 
-  return NextResponse.json({ ok: true, payoutId })
+  return NextResponse.json({
+    ok: true,
+    payoutId,
+    alreadyPaid: false,
+    batchPaidUpdated,
+  })
 }

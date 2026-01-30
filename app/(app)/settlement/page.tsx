@@ -960,6 +960,19 @@ function WorkforceSettlementTab({
   const [completeScopeDialogOpen, setCompleteScopeDialogOpen] = useState(false)
   const [isCompletingScope, setIsCompletingScope] = useState(false)
 
+  // ✅ 추가분(하루) 생성 다이얼로그
+  const [adjustmentDialogOpen, setAdjustmentDialogOpen] = useState(false)
+
+  const [pendingSettlePayload, setPendingSettlePayload] = useState<{
+    siteId: string
+    periodStart: string
+    periodEnd: string
+    includeTeams: boolean
+    workerIds: string[]
+    teamLeaderIds: string[]
+    selectedLabel: string
+  } | null>(null)
+
   useEffect(() => {
     if (!siteId) return
     loadSettlements()
@@ -1214,6 +1227,10 @@ function WorkforceSettlementTab({
       const json = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(json?.error ?? "정산 확정 실패")
 
+      const warnings = Array.isArray(json?.warnings) ? json.warnings : []
+      warnings.forEach((w: string) => toast.warning(w))
+
+
       toast.success(`정산 확정 완료 (${selectedLabel})`)
       setSelectedIds([])
       setConfirmDialogOpen(false)
@@ -1231,32 +1248,104 @@ function WorkforceSettlementTab({
   const handleCompleteScope = async () => {
     if (!siteId) return
 
+    // ✅ 선택 없음 방지(서버도 400을 권장하지만, 프론트도 안전하게)
+    if (selectedIds.length === 0) {
+      toast.error("선택된 정산 대상이 없습니다")
+      return
+    }
+
+    const basePayload = {
+      siteId,
+      periodStart: range.start,
+      periodEnd: range.end,
+      includeTeams: true,
+      workerIds: selectedWorkerIds,
+      teamLeaderIds: selectedTeamLeaderIds,
+    }
+
+    // 혹시라도 workerIds/teamLeaderIds가 모두 비는 경우 방지(팀/개인 판별 꼬임 대비)
+    if (basePayload.workerIds.length === 0 && basePayload.teamLeaderIds.length === 0) {
+      toast.error("정산 대상(인력/팀)을 확인할 수 없습니다. 다시 선택해주세요.")
+      return
+    }
+
+    setIsCompletingScope(true)
+
+    try {
+      const res = await fetch("/api/payout-items/settle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(basePayload),
+      })
+
+      const json = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        const msg = String(json?.error ?? "정산확정 실패")
+
+        // ✅ 본정산이 PAID로 마감된 경우 → 추가분(하루)로 유도
+        if (res.status === 409 && msg.includes("already PAID")) {
+          setPendingSettlePayload({
+            ...basePayload,
+            selectedLabel,
+          })
+          setAdjustmentDialogOpen(true)
+          return
+        }
+
+        throw new Error(msg)
+      }
+      const warnings = Array.isArray(json?.warnings) ? json.warnings : []
+      warnings.forEach((w: string) => toast.warning(w))
+
+
+      toast.success(`정산 확정 완료 (${selectedLabel})`)
+      setCompleteScopeDialogOpen(false)
+      setSelectedIds([])
+      await loadSettlements()
+    } catch (e: any) {
+      toast.error(e?.message ?? "정산확정 실패")
+    } finally {
+      setIsCompletingScope(false)
+    }
+  }
+
+    const handleCreateAdjustment = async () => {
+    if (!pendingSettlePayload) return
+
     setIsCompletingScope(true)
     try {
-      console.log("[settle] selectedLabel", selectedLabel, { selectedWorkerIds, selectedTeamLeaderIds, range })
       const res = await fetch("/api/payout-items/settle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          siteId,
-          periodStart: range.start,
-          periodEnd: range.end,
-          includeTeams: true,
-          ...(selectedIds.length > 0
-            ? { workerIds: selectedWorkerIds, teamLeaderIds: selectedTeamLeaderIds }
-            : {}),
+          siteId: pendingSettlePayload.siteId,
+          periodStart: pendingSettlePayload.periodStart,
+          periodEnd: pendingSettlePayload.periodEnd,
+          includeTeams: pendingSettlePayload.includeTeams,
+          workerIds: pendingSettlePayload.workerIds,
+          teamLeaderIds: pendingSettlePayload.teamLeaderIds,
+
+          // ✅ 추가분(기간) 무한 생성
+          settleMode: "ADJUSTMENT",
         }),
       })
 
       const json = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json?.error ?? "정산완료 생성 실패")
+      if (!res.ok) throw new Error(json?.error ?? "추가분 정산 생성 실패")
 
-      toast.success(`정산완료 생성: ${json?.created ?? 0}건 (업데이트 ${json?.updated ?? 0}건)`)
+      const warnings = Array.isArray(json?.warnings) ? json.warnings : []
+      warnings.forEach((w: string) => toast.warning(w))
+
+      toast.success(`추가분 정산 생성 완료 (${pendingSettlePayload.selectedLabel})`)
+
+      setAdjustmentDialogOpen(false)
+      setPendingSettlePayload(null)
       setCompleteScopeDialogOpen(false)
-
+      setSelectedIds([])
       await loadSettlements()
     } catch (e: any) {
-      toast.error(e?.message ?? "정산완료 처리 실패")
+      toast.error(e?.message ?? "추가분 정산 생성 실패")
     } finally {
       setIsCompletingScope(false)
     }
@@ -1651,6 +1740,42 @@ function WorkforceSettlementTab({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      {/* ✅ 추가분(하루) 정산 생성 다이얼로그 */}
+      <AlertDialog open={adjustmentDialogOpen} onOpenChange={setAdjustmentDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>본정산이 마감되었습니다</AlertDialogTitle>
+            <AlertDialogDescription>
+              해당 기간은 이미 지급 완료(PAID)로 마감되어 본정산에 추가할 수 없습니다.
+              <br />
+              누락/추가 인력은 <b>추가분(하루)</b>으로 정산을 생성하세요.
+              <br />
+              <span className="text-muted-foreground">
+                선택: {pendingSettlePayload?.selectedLabel ?? "-"}
+              </span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              onClick={() => {
+                setAdjustmentDialogOpen(false)
+                setPendingSettlePayload(null)
+              }}
+            >
+              취소
+            </AlertDialogCancel>
+
+            <AlertDialogAction
+              onClick={handleCreateAdjustment}
+              disabled={!pendingSettlePayload || isCompletingScope}
+            >
+              {isCompletingScope ? "처리 중..." : "추가분 정산 생성"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
     </div>
   )
 }
@@ -2055,6 +2180,7 @@ function PayoutManagementTab({
           periodEnd: end,
           method: "계좌이체",
           memo: payoutMemo,
+          payableItemIds: selectedPayableIds,
           items,
         }),
       })

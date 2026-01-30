@@ -24,13 +24,23 @@ export async function POST(req: Request) {
   const method = String(body?.method ?? "BANK").trim()
   const memo = String(body?.memo ?? "").trim()
 
-  // optionally support batchId from client (preferred once UI is updated)
+  // ✅ 개별지급: 선택한 payout_items.id 리스트
+  const payableItemIds = Array.isArray(body?.payableItemIds)
+    ? (body.payableItemIds as any[]).map((x) => String(x)).filter(Boolean)
+    : []
+
+  // optionally support batchId from client
   const batchIdFromBody = String(body?.settlementBatchId ?? body?.batchId ?? "").trim()
 
   if (!siteId) return jsonError("siteId is required", 400)
   if (!siteName) return jsonError("siteName is required", 400)
   if (!isYmd(start) || !isYmd(end)) return jsonError("start/end must be YYYY-MM-DD", 400)
   if (start > end) return jsonError("start must be <= end", 400)
+
+  // ✅ 실수 방지: 선택 없으면 전체지급이 되어버리므로 금지
+  if (payableItemIds.length === 0) {
+    return jsonError("payableItemIds is required for individual payout", 400)
+  }
 
   // 0) get-or-create batch
   let batchId = batchIdFromBody || ""
@@ -90,6 +100,7 @@ export async function POST(req: Request) {
     }
   }
 
+  // PAID 배치는 신규 지급 생성/링크 금지(정책 유지)
   if (batchStatus === "PAID") return jsonError("This settlement batch is already PAID", 409)
 
   // 1) payout 생성
@@ -113,31 +124,39 @@ export async function POST(req: Request) {
 
   if (pErr) return jsonError(pErr.message, 500)
 
-  // 2) batch의 payout_items(미지급)만 이 payout에 연결
-  const { data: items, error: iErr } = await supabaseAdmin
+  // 2) ✅ 선택된 payout_items만 이 payout에 연결
+  //    - office/site/batch/status/payout_id 조건을 만족해야 함
+  const { data: selectedItems, error: selErr } = await supabaseAdmin
     .from("payout_items")
-    .select("id")
+    .select("id, status, payout_id")
     .eq("office_id", s.officeId)
+    .eq("site_id", siteId)
     .eq("settlement_batch_id", batchId)
-    .is("payout_id", null)
-    .eq("status", "ACCUMULATED")
+    .in("id", payableItemIds)
 
-  if (iErr) return jsonError(iErr.message, 500)
-  const itemIds = (items ?? []).map((x: any) => x.id).filter(Boolean)
+  if (selErr) return jsonError(selErr.message, 500)
 
-  if (itemIds.length === 0) {
-    return NextResponse.json({ payoutId: payout.id, linked: 0, inserted: 0, note: "No payable items in batch" })
+  const eligibleIds = (selectedItems ?? [])
+    .filter((it: any) => it.status === "ACCUMULATED" && it.payout_id == null)
+    .map((it: any) => it.id)
+
+  // “내가 체크한 것만 지급” 보장을 위해, 일부라도 조건 불일치면 실패 처리
+  if (eligibleIds.length !== payableItemIds.length) {
+    return jsonError(
+      `Some items are not eligible (must be ACCUMULATED and not linked). requested=${payableItemIds.length}, eligible=${eligibleIds.length}`,
+      409
+    )
   }
 
   const { error: linkErr } = await supabaseAdmin
     .from("payout_items")
     .update({ payout_id: payout.id })
     .eq("office_id", s.officeId)
-    .in("id", itemIds)
+    .in("id", eligibleIds)
 
   if (linkErr) return jsonError(linkErr.message, 500)
 
-  return NextResponse.json({ payoutId: payout.id, linked: itemIds.length, inserted: 0 })
+  return NextResponse.json({ payoutId: payout.id, linked: eligibleIds.length, inserted: 0 })
 }
 
 export async function GET(req: Request) {

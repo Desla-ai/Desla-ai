@@ -6,11 +6,22 @@ import { verifySessionCookie, SESSION_COOKIE_NAME } from "@/lib/server/session"
 function jsonError(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status })
 }
+
 function isYmd(v: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(v)
 }
 function ymdToYm(v: string) {
   return v.slice(0, 7)
+}
+
+type SettleMode = "NORMAL" | "ADJUSTMENT"
+
+function diffDaysInclusive(startYmd: string, endYmd: string) {
+  const start = new Date(`${startYmd}T00:00:00Z`).getTime()
+  const end = new Date(`${endYmd}T00:00:00Z`).getTime()
+  const ms = end - start
+  const days = Math.floor(ms / (24 * 60 * 60 * 1000)) + 1
+  return Math.max(1, days)
 }
 
 function calcCommission(gross: number, rule: any | null) {
@@ -45,10 +56,123 @@ function pickRule(rules: any[], args: { workerId: string; occupation: string; ym
 
 function toUnitsNumber(v: any) {
   const n = Number(v)
-  // daily_settlements에서 work_units는 NOT NULL + CHECK가 있으니 보통 안전하지만,
-  // 혹시 모를 데이터/타입 불일치 방어
   if (!Number.isFinite(n)) return 1.0
   return n
+}
+
+async function getLatestNormalBatch(args: {
+  officeId: string
+  siteId: string
+  periodStart: string
+  periodEnd: string
+}) {
+  const { officeId, siteId, periodStart, periodEnd } = args
+
+  const { data: rows, error } = await supabaseAdmin
+    .from("settlement_batches")
+    .select("id, status")
+    .eq("office_id", officeId)
+    .eq("site_id", siteId)
+    .eq("period_start", periodStart)
+    .eq("period_end", periodEnd)
+    .eq("batch_kind", "NORMAL")
+    .eq("adjustment_seq", 0)
+    .order("created_at", { ascending: false })
+    .limit(1)
+
+  if (error) throw new Error(error.message)
+  return rows?.[0] ?? null
+}
+
+async function getOrCreateNormalBatch(args: {
+  officeId: string
+  siteId: string
+  periodStart: string
+  periodEnd: string
+  userId: string
+}) {
+  const { officeId, siteId, periodStart, periodEnd, userId } = args
+
+  const existing = await getLatestNormalBatch({ officeId, siteId, periodStart, periodEnd })
+  if (existing?.id) {
+    return { batchId: String(existing.id), batchStatus: String(existing.status ?? "DRAFT"), created: false }
+  }
+
+  const { data: created, error: insErr } = await supabaseAdmin
+    .from("settlement_batches")
+    .insert([
+      {
+        office_id: officeId,
+        site_id: siteId,
+        period_start: periodStart,
+        period_end: periodEnd,
+        batch_kind: "NORMAL",
+        adjustment_seq: 0,
+        status: "DRAFT",
+        created_by_user_id: userId,
+      },
+    ])
+    .select("id, status")
+    .single()
+
+  if (insErr) throw new Error(insErr.message)
+
+  return { batchId: String(created.id), batchStatus: String(created.status ?? "DRAFT"), created: true }
+}
+
+async function createAdjustmentBatch(args: {
+  officeId: string
+  siteId: string
+  periodStart: string
+  periodEnd: string
+  userId: string
+  parentBatchId?: string | null
+}) {
+  const { officeId, siteId, periodStart, periodEnd, userId, parentBatchId } = args
+
+  const { data: rows, error: seqErr } = await supabaseAdmin
+    .from("settlement_batches")
+    .select("adjustment_seq")
+    .eq("office_id", officeId)
+    .eq("site_id", siteId)
+    .eq("period_start", periodStart)
+    .eq("period_end", periodEnd)
+    .eq("batch_kind", "ADJUSTMENT")
+
+  if (seqErr) throw new Error(seqErr.message)
+
+  const maxSeq = (rows ?? []).reduce((m: number, r: any) => Math.max(m, Number(r.adjustment_seq ?? 0)), 0) || 0
+  const nextSeq = maxSeq + 1
+
+  const { data: created, error: insErr } = await supabaseAdmin
+    .from("settlement_batches")
+    .insert([
+      {
+        office_id: officeId,
+        site_id: siteId,
+        period_start: periodStart,
+        period_end: periodEnd,
+        batch_kind: "ADJUSTMENT",
+        adjustment_seq: nextSeq,
+        parent_batch_id: parentBatchId ?? null,
+        status: "DRAFT",
+        created_by_user_id: userId,
+      },
+    ])
+    .select("id, status, adjustment_seq")
+    .single()
+
+  if (insErr) throw new Error(insErr.message)
+
+  return {
+    batchId: String(created.id),
+    batchStatus: String(created.status ?? "DRAFT"),
+    adjustmentSeq: Number(created.adjustment_seq ?? nextSeq),
+  }
+}
+
+function ymdInRange(d: string, start: string, end: string) {
+  return start <= d && d <= end
 }
 
 export async function POST(req: Request) {
@@ -58,70 +182,90 @@ export async function POST(req: Request) {
   const s = session
 
   const body = await req.json().catch(() => ({}))
+
   const siteId = String(body?.siteId ?? "").trim()
   const periodStart = String(body?.periodStart ?? "").trim()
   const periodEnd = String(body?.periodEnd ?? "").trim()
   const includeTeams = Boolean(body?.includeTeams ?? true)
+  const settleMode = String(body?.settleMode ?? "NORMAL").toUpperCase() as SettleMode
 
   const workerIds = Array.isArray(body?.workerIds)
     ? (body.workerIds as any[]).map((x) => String(x)).filter(Boolean)
     : null
-
   const teamLeaderIds = Array.isArray(body?.teamLeaderIds)
     ? (body.teamLeaderIds as any[]).map((x) => String(x)).filter(Boolean)
     : null
 
   if (!siteId) return jsonError("siteId is required", 400)
-  if (!isYmd(periodStart) || !isYmd(periodEnd)) {
-    return jsonError("periodStart/periodEnd must be YYYY-MM-DD", 400)
-  }
+  if (!isYmd(periodStart) || !isYmd(periodEnd)) return jsonError("periodStart/periodEnd must be YYYY-MM-DD", 400)
   if (periodStart > periodEnd) return jsonError("periodStart must be <= periodEnd", 400)
+  if (settleMode !== "NORMAL" && settleMode !== "ADJUSTMENT") return jsonError("settleMode must be NORMAL or ADJUSTMENT", 400)
 
-  // 0) get-or-create batch
-  const { data: existingBatch, error: bFindErr } = await supabaseAdmin
-    .from("settlement_batches")
-    .select("id, status")
-    .eq("office_id", s.officeId)
-    .eq("site_id", siteId)
-    .eq("period_start", periodStart)
-    .eq("period_end", periodEnd)
-    .maybeSingle()
-
-  if (bFindErr) return jsonError(bFindErr.message, 500)
-
-  let batchId = existingBatch?.id as string | undefined
-  if (!batchId) {
-    const { data: createdBatch, error: bInsErr } = await supabaseAdmin
-      .from("settlement_batches")
-      .insert([
-        {
-          office_id: s.officeId,
-          site_id: siteId,
-          period_start: periodStart,
-          period_end: periodEnd,
-          status: "DRAFT",
-          created_by_user_id: s.userId,
-        },
-      ])
-      .select("id, status")
-      .single()
-
-    if (bInsErr) return jsonError(bInsErr.message, 500)
-    batchId = createdBatch.id
+  // 선택 대상 없이 전체 확정되는 사고 방지
+  if ((!workerIds || workerIds.length === 0) && (!teamLeaderIds || teamLeaderIds.length === 0)) {
+    return jsonError("workerIds or teamLeaderIds is required", 400)
   }
 
-  // 이미 PAID로 마감된 배치는 정산확정 불가
-  if (existingBatch?.status === "PAID") {
-    return jsonError("This settlement batch is already PAID", 409)
+  const warnings: string[] = []
+  if (settleMode === "ADJUSTMENT") {
+    const days = diffDaysInclusive(periodStart, periodEnd)
+    if (days > 7) {
+      warnings.push(
+        `추가분(ADJUSTMENT) 기간이 ${days}일입니다(권장 7일 이하). 기간이 길면 '현장+날짜' 중복지급 방지 로직이 보수적으로 작동해 일부 지급예정이 제외될 수 있습니다.`
+      )
+    }
   }
 
-  // 1) settlement_rules
+  // 0) 배치 결정
+  let batchId = ""
+  let batchStatus = ""
+  let adjustmentSeq: number | null = null
+  let parentBatchId: string | null = null
+
+  try {
+    if (settleMode === "NORMAL") {
+      const b = await getOrCreateNormalBatch({
+        officeId: s.officeId,
+        siteId,
+        periodStart,
+        periodEnd,
+        userId: s.userId,
+      })
+      batchId = b.batchId
+      batchStatus = b.batchStatus
+
+      if (batchStatus === "PAID") return jsonError("This settlement batch is already PAID", 409)
+    } else {
+      const normal = await getLatestNormalBatch({
+        officeId: s.officeId,
+        siteId,
+        periodStart,
+        periodEnd,
+      })
+      parentBatchId = normal?.id ? String(normal.id) : null
+
+      const b = await createAdjustmentBatch({
+        officeId: s.officeId,
+        siteId,
+        periodStart,
+        periodEnd,
+        userId: s.userId,
+        parentBatchId,
+      })
+      batchId = b.batchId
+      batchStatus = b.batchStatus
+      adjustmentSeq = b.adjustmentSeq
+    }
+  } catch (e: any) {
+    return jsonError(e?.message ?? "Failed to get or create batch", 500)
+  }
+
+  // 1) rules
   const { data: rulesRows, error: rErr } = await supabaseAdmin
     .from("settlement_rules")
     .select("id, site_id, type, target_id, target_name, commission_type, commission_value, effective_start, effective_end")
     .eq("office_id", s.officeId)
     .eq("site_id", siteId)
-
   if (rErr) return jsonError(rErr.message, 500)
 
   const rules = (rulesRows ?? []).map((r: any) => ({
@@ -136,24 +280,28 @@ export async function POST(req: Request) {
     effectiveEnd: r.effective_end,
   }))
 
-  // 2) locked=true daily_settlements (✅ work_units 포함)
+  // 2) daily_settlements (locked=true) in period
+  const dsStart = periodStart
+  const dsEnd = periodEnd
+
   const { data: dsRows, error: dErr } = await supabaseAdmin
     .from("daily_settlements")
     .select("worker_id, work_date, daily_wage, work_units")
     .eq("office_id", s.officeId)
     .eq("site_id", siteId)
-    .gte("work_date", periodStart)
-    .lte("work_date", periodEnd)
+    .gte("work_date", dsStart)
+    .lte("work_date", dsEnd)
     .eq("locked", true)
-
   if (dErr) return jsonError(dErr.message, 500)
 
-  // 3) workers (name + role)
+  // 이번 기간에 실제로 “일한 날짜” 셋(현장+날짜 기준으로 중복지급 방지에 사용)
+  const workedDates = Array.from(new Set((dsRows ?? []).map((r: any) => String(r.work_date)).filter(Boolean))).sort()
+
+  // 3) workers
   const { data: workerRows, error: wErr } = await supabaseAdmin
     .from("workers")
     .select("id, name, worker_roles(roles(name))")
     .eq("office_id", s.officeId)
-
   if (wErr) return jsonError(wErr.message, 500)
 
   const workerById = new Map<string, any>()
@@ -162,23 +310,17 @@ export async function POST(req: Request) {
     workerById.set(w.id, { ...w, roleName })
   }
 
-  // 4) worker별 합산 (✅ 공수 반영)
-  // gross = Σ(daily_wage * work_units)
-  // workUnits = Σ(work_units)
+  // 4) agg
   const agg = new Map<string, { gross: number; workUnits: number }>()
   for (const r of dsRows ?? []) {
     const wid = String((r as any).worker_id)
     const wage = Number((r as any).daily_wage ?? 0)
     const units = toUnitsNumber((r as any).work_units ?? 1.0)
-
     const prev = agg.get(wid) ?? { gross: 0, workUnits: 0 }
-    agg.set(wid, {
-      gross: prev.gross + wage * units,
-      workUnits: prev.workUnits + units,
-    })
+    agg.set(wid, { gross: prev.gross + wage * units, workUnits: prev.workUnits + units })
   }
 
-  // 5) team info
+  // 5) teams
   let leaderToMemberIds = new Map<string, string[]>()
   if (includeTeams) {
     const { data: teams, error: tErr } = await supabaseAdmin
@@ -186,7 +328,6 @@ export async function POST(req: Request) {
       .select("id, leader_worker_id, site_id")
       .eq("office_id", s.officeId)
       .or(`site_id.is.null,site_id.eq.${siteId}`)
-
     if (tErr) return jsonError(tErr.message, 500)
 
     const teamIds = (teams ?? []).map((t: any) => t.id)
@@ -195,7 +336,6 @@ export async function POST(req: Request) {
         .from("team_members")
         .select("team_id, worker_id")
         .in("team_id", teamIds)
-
       if (mErr) return jsonError(mErr.message, 500)
 
       const membersByTeamId = new Map<string, string[]>()
@@ -213,25 +353,42 @@ export async function POST(req: Request) {
     }
   }
 
-  // 6) payout_items rows (배치 단위)
+  // 6) “현장+날짜 1회 지급” 차단용: 이번 기간에 영향을 주는 PAID payout_items만 가져오기
+  const { data: paidRows, error: paidErr } = await supabaseAdmin
+    .from("payout_items")
+    .select("payee_type, payee_id, period_start, period_end")
+    .eq("office_id", s.officeId)
+    .eq("site_id", siteId)
+    .eq("status", "PAID")
+    .lte("period_start", dsEnd)
+    .gte("period_end", dsStart)
+    .limit(10000)
+  if (paidErr) return jsonError(paidErr.message, 500)
+
+  // payeeKey -> list of paid ranges
+  const paidRangesByPayee = new Map<string, Array<{ start: string; end: string }>>()
+  for (const r of paidRows ?? []) {
+    const key = `${r.payee_type}:${r.payee_id}`
+    const arr = paidRangesByPayee.get(key) ?? []
+    arr.push({ start: String(r.period_start), end: String(r.period_end) })
+    paidRangesByPayee.set(key, arr)
+  }
+
+  // “현장+날짜” 차단을 날짜별로 정확히 하기:
+  // 이번 settle 기간 중 실제 workedDates 중 하나라도 paid range에 포함되면 차단
+  function isPaidOnAnyWorkedDate(payeeType: "WORKER" | "FOREMAN", payeeId: string) {
+    const key = `${payeeType}:${payeeId}`
+    const ranges = paidRangesByPayee.get(key) ?? []
+    if (ranges.length === 0) return false
+    if (workedDates.length === 0) return false
+    return workedDates.some((d) => ranges.some((rr) => ymdInRange(d, rr.start, rr.end)))
+  }
+
+  // 7) payout_items rows
   const usedInTeam = new Set<string>()
   const rowsToCreate: any[] = []
 
-  // ✅ 이미 PAID인 payee는 이번 정산확정에서 다시 ACCUMULATED로 만들면 안 됨
-  const { data: paidExisting, error: paidExErr } = await supabaseAdmin
-    .from("payout_items")
-    .select("payee_type, payee_id")
-    .eq("office_id", s.officeId)
-    .eq("settlement_batch_id", batchId)
-    .eq("status", "PAID")
-
-  if (paidExErr) return jsonError(paidExErr.message, 500)
-
-  const paidKeySet = new Set<string>()
-  for (const r of paidExisting ?? []) {
-    paidKeySet.add(`${r.payee_type}:${r.payee_id}`)
-  }
-
+  // 팀(FOREMAN)
   if (includeTeams) {
     for (const [leaderId, memberIds] of leaderToMemberIds.entries()) {
       if (teamLeaderIds && !teamLeaderIds.includes(leaderId)) continue
@@ -248,19 +405,18 @@ export async function POST(req: Request) {
       }
       if (total <= 0) continue
 
+      if (isPaidOnAnyWorkedDate("FOREMAN", leaderId)) continue
+
       const leader = workerById.get(leaderId)
       const payeeName = leader?.name ?? "반장"
-
-      // ✅ 이미 지급완료(PAID)된 FOREMAN은 다시 정산확정 생성 금지
-      if (paidKeySet.has(`FOREMAN:${leaderId}`)) continue
 
       rowsToCreate.push({
         settlement_batch_id: batchId,
         payout_id: null,
         office_id: s.officeId,
         site_id: siteId,
-        period_start: periodStart,
-        period_end: periodEnd,
+        period_start: dsStart,
+        period_end: dsEnd,
         payee_type: "FOREMAN",
         payee_id: leaderId,
         payee_name: payeeName,
@@ -272,10 +428,13 @@ export async function POST(req: Request) {
     }
   }
 
-  const ym = ymdToYm(periodStart)
+  // 개인(WORKER)
+  const ym = ymdToYm(dsStart)
   for (const [workerId, a] of agg.entries()) {
     if (workerIds && !workerIds.includes(workerId)) continue
     if (usedInTeam.has(workerId)) continue
+
+    if (isPaidOnAnyWorkedDate("WORKER", workerId)) continue
 
     const w = workerById.get(workerId)
     const name = w?.name ?? "인력"
@@ -286,16 +445,13 @@ export async function POST(req: Request) {
     const net = Math.max(0, a.gross - commission)
     if (net <= 0) continue
 
-    // ✅ 이미 지급완료(PAID)된 WORKER는 다시 정산확정 생성 금지
-    if (paidKeySet.has(`WORKER:${workerId}`)) continue
-
     rowsToCreate.push({
       settlement_batch_id: batchId,
       payout_id: null,
       office_id: s.officeId,
       site_id: siteId,
-      period_start: periodStart,
-      period_end: periodEnd,
+      period_start: dsStart,
+      period_end: dsEnd,
       payee_type: "WORKER",
       payee_id: workerId,
       payee_name: name,
@@ -306,26 +462,29 @@ export async function POST(req: Request) {
     })
   }
 
-  // 7) upsert by unique index (settlement_batch_id, payee_type, payee_id)
   const { data: upserted, error: upErr } = await supabaseAdmin
     .from("payout_items")
     .upsert(rowsToCreate, { onConflict: "settlement_batch_id,payee_type,payee_id" })
     .select("id")
-
   if (upErr) return jsonError(upErr.message, 500)
 
-  // 8) mark batch CONFIRMED
   const { error: bUpErr } = await supabaseAdmin
     .from("settlement_batches")
     .update({ status: "CONFIRMED", confirmed_at: new Date().toISOString() })
     .eq("office_id", s.officeId)
     .eq("id", batchId)
-
   if (bUpErr) return jsonError(bUpErr.message, 500)
 
   return NextResponse.json({
     ok: true,
+    warnings,
+    settleMode,
     batchId,
+    batchStatus: "CONFIRMED",
+    adjustmentSeq,
+    parentBatchId,
+    periodStart: dsStart,
+    periodEnd: dsEnd,
     upsertedCount: (upserted ?? []).length,
   })
 }
