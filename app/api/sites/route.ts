@@ -1,55 +1,35 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { verifySessionCookie, SESSION_COOKIE_NAME } from "@/lib/server/session";
 import { supabaseAdmin } from "@/lib/server/supabase-admin";
 import { toSiteDTO } from "@/lib/server/site-dto";
 
-/**
- * DB row(snake_case) -> Front row(camelCase)
- * (현재는 toSiteDTO를 쓰고 있으니 사실상 이 함수는 POST 응답용으로만 필요)
- */
-function mapSiteRow(s: any) {
-  if (!s) return s;
-
-  return {
-    id: s.id,
-    officeId: s.office_id,
-
-    name: s.name ?? "",
-    address: s.address ?? "",
-
-    startDate: s.start_date ?? "",
-    endDate: s.end_date ?? "",
-
-    plannedWorkers: s.planned_workers ?? 0,
-    assignedWorkers: s.assigned_workers ?? 0,
-    todayRequired: s.today_required ?? 0,
-
-    status: s.status ?? "미진행",
-    progress: s.progress ?? 0,
-
-    checkInTime: s.check_in_time ?? "",
-    officePhone: s.office_phone ?? "",
-
-    defaultSettlementMode: s.default_settlement_mode ?? null,
-
-    createdAt: s.created_at ?? null,
-    updatedAt: s.updated_at ?? null,
-  };
+function jsonError(message: string, status = 400) {
+  return NextResponse.json({ error: message }, { status });
 }
 
+function normalizeSiteName(name: string) {
+  return String(name ?? "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+
 /**
- * Front payload(camelCase) -> DB insert/update payload(snake_case)
+ * Front payload(camelCase) -> DB insert payload(snake_case)
  * - camelCase/snake_case 모두 받기
- * - "값이 0/false/''이어도" 누락되지 않게 in 연산자로 처리
+ * - 0/false/''도 유효값이므로 in 연산자로 처리
+ * - companyId는 필수 (현장 생성 정책)
  */
 function mapSitePayload(body: any, officeId: string) {
-  const payload: any = {
-    office_id: officeId,
-  };
+  const payload: any = { office_id: officeId };
 
   // 필수 name
   payload.name = String(body?.name ?? "").trim();
+
+  // ✅ company_id (필수) - camel/snake 둘 다 받기
+  const companyId = String(body?.companyId ?? body?.company_id ?? "").trim();
+  payload.company_id = companyId;
 
   // address
   if ("address" in body) payload.address = body.address ?? "";
@@ -79,7 +59,7 @@ function mapSitePayload(body: any, officeId: string) {
     payload.today_required = 0;
   }
 
-  // check_in_time: 빈 문자열도 유효(사용자 입력 결과)
+  // check_in_time: 빈 문자열도 유효
   if ("checkInTime" in body || "check_in_time" in body) {
     payload.check_in_time = body.check_in_time ?? body.checkInTime ?? "";
   }
@@ -98,10 +78,10 @@ function mapSitePayload(body: any, officeId: string) {
   return payload;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const cookieStore = await cookies();
   const session = verifySessionCookie(cookieStore.get(SESSION_COOKIE_NAME)?.value);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session) return jsonError("Unauthorized", 401);
 
   const { data, error } = await supabaseAdmin
     .from("sites")
@@ -109,35 +89,62 @@ export async function GET() {
     .eq("office_id", session.officeId)
     .order("created_at", { ascending: false });
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return jsonError(error.message, 500);
 
   const sites = (data ?? []).map(toSiteDTO);
   return NextResponse.json({ sites });
 }
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   const cookieStore = await cookies();
   const session = verifySessionCookie(cookieStore.get(SESSION_COOKIE_NAME)?.value);
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session) return jsonError("Unauthorized", 401);
 
-  const body = await req.json();
+  const body = await req.json().catch(() => ({}));
 
   // 최소 검증
-  if (!body?.name || String(body.name).trim() === "") {
-    return NextResponse.json({ error: "name은 필수입니다." }, { status: 400 });
-  }
+  const name = String(body?.name ?? "").trim();
+  if (!name) return jsonError("name은 필수입니다.", 400);
+
+  // ✅ companyId 필수 (정책 LOCK)
+  const companyId = String(body?.companyId ?? body?.company_id ?? "").trim();
+  if (!companyId) return jsonError("companyId is required", 400);
 
   const payload = mapSitePayload(body, session.officeId);
 
+  // ✅ name 정규화(서버 기준 통일)
+  payload.name = normalizeSiteName(payload.name);
+
+  // ✅ companyId도 정규화(혹시 공백 들어오는 케이스 방지)
+  payload.company_id = String(payload.company_id ?? "").trim();
+
+  // ✅ 멱등성 가드(정책 2번):
+  // 같은 office_id + company_id + name 이면 "이미 있는 현장"으로 보고 기존 반환
+  const { data: existing, error: exErr } = await supabaseAdmin
+    .from("sites")
+    .select("*")
+    .eq("office_id", session.officeId)
+    .eq("company_id", payload.company_id)
+    .eq("name", payload.name)
+    .maybeSingle();
+
+  if (exErr) return jsonError(exErr.message, 500);
+
+  if (existing) {
+    return NextResponse.json({ site: toSiteDTO(existing), deduped: true });
+  }
+
+  // 없으면 새로 생성
   const { data, error } = await supabaseAdmin
     .from("sites")
     .insert(payload)
     .select("*")
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // 응답은 DTO로 통일하는 게 가장 깔끔함
+  if (error) return jsonError(error.message, 500);
+  if (!data) return jsonError("Failed to create site", 500);
+
+  // 응답은 DTO로 통일
   return NextResponse.json({ site: toSiteDTO(data) });
-  // (원하면 mapSiteRow(data)도 되지만, 이미 toSiteDTO를 쓰는 흐름이므로 통일 권장)
 }

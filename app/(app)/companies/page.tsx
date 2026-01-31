@@ -8,10 +8,15 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { CompanyDetailSheet } from "@/components/companies/company-detail-sheet";
+import { Label } from "@/components/ui/label";
 
 export type Company = {
   id: string;
   name: string;
+  biz_no?: string;
+  ceo_name?: string;
+  address?: string;
+  phone?: string;
   created_at?: string;
   updated_at?: string;
 };
@@ -33,13 +38,32 @@ export default function CompaniesPage() {
   const [sheetOpen, setSheetOpen] = useState(false);
 
   const [addOpen, setAddOpen] = useState(false);
-  const [newName, setNewName] = useState("");
-  const canCreate = useMemo(() => newName.trim().length > 0, [newName]);
+
+  // ✅ New Company form
+  const [newCompanyName, setNewCompanyName] = useState("");
+  const [newCompanyBizNo, setNewCompanyBizNo] = useState("");
+  const [newCompanyCeoName, setNewCompanyCeoName] = useState("");
+  const [newCompanyAddress, setNewCompanyAddress] = useState("");
+  const [newCompanyPhone, setNewCompanyPhone] = useState("");
+
+  const canCreate = useMemo(() => {
+    const nameOk = newCompanyName.trim().length > 0;
+    const bizOk = newCompanyBizNo.trim().length > 0;
+    return nameOk && bizOk;
+  }, [newCompanyName, newCompanyBizNo]);
+
+  const resetCreateForm = () => {
+    setNewCompanyName("");
+    setNewCompanyBizNo("");
+    setNewCompanyCeoName("");
+    setNewCompanyAddress("");
+    setNewCompanyPhone("");
+  };
 
   const loadCompanies = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/companies");
+      const res = await fetch("/api/companies", { cache: "no-store" });
       const json = await safeJson(res);
       if (!res.ok) throw new Error(json?.error ?? `불러오기 실패 (${res.status})`);
       setCompanies(Array.isArray(json?.companies) ? json.companies : []);
@@ -60,19 +84,27 @@ export default function CompaniesPage() {
   };
 
   const handleCreate = async () => {
-    const name = newName.trim();
-    if (!name) return;
+    const name = newCompanyName.trim();
+    const bizNo = newCompanyBizNo.trim();
+    const ceoName = newCompanyCeoName.trim();
+    const address = newCompanyAddress.trim();
+    const phone = newCompanyPhone.trim();
+
+    if (!name) return toast.error("회사명을 입력해 주세요.");
+    if (!bizNo) return toast.error("사업자번호를 입력해 주세요.");
+
     try {
       const res = await fetch("/api/companies", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, bizNo, ceoName, address, phone }),
       });
       const json = await safeJson(res);
       if (!res.ok) throw new Error(json?.error ?? `생성 실패 (${res.status})`);
+
       toast.success("회사를 추가했습니다");
       setAddOpen(false);
-      setNewName("");
+      resetCreateForm();
       await loadCompanies();
     } catch (e: any) {
       toast.error(e?.message ?? "회사 추가 중 오류가 발생했습니다");
@@ -80,7 +112,6 @@ export default function CompaniesPage() {
   };
 
   const handleUpdated = async (c: Company | null) => {
-    // Update selected company in state + refresh list
     setSelectedCompany(c);
     await loadCompanies();
   };
@@ -93,7 +124,14 @@ export default function CompaniesPage() {
             <h1 className="text-2xl font-semibold">회사</h1>
             <p className="text-sm text-muted-foreground">건설사(업체) 기본 정보를 관리합니다.</p>
           </div>
-          <Button onClick={() => setAddOpen(true)}>회사 추가</Button>
+          <Button
+            onClick={() => {
+              resetCreateForm();
+              setAddOpen(true);
+            }}
+          >
+            회사 추가
+          </Button>
         </div>
 
         {loading ? (
@@ -112,29 +150,90 @@ export default function CompaniesPage() {
               >
                 <CardContent className="p-5">
                   <div className="text-base font-semibold">{c.name}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">클릭하여 상세/출력을 확인하세요</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    클릭하여 상세/출력을 확인하세요
+                  </div>
                 </CardContent>
               </Card>
             ))}
           </div>
         )}
 
-        <Dialog open={addOpen} onOpenChange={setAddOpen}>
-          <DialogContent>
+        {/* Create Company Dialog */}
+        <Dialog
+          open={addOpen}
+          onOpenChange={(o) => {
+            setAddOpen(o);
+            if (!o) resetCreateForm();
+          }}
+        >
+          <DialogContent className="sm:max-w-lg">
             <DialogHeader>
               <DialogTitle>회사 추가</DialogTitle>
             </DialogHeader>
-            <div className="grid gap-2">
-              <label className="text-sm font-medium">회사명</label>
-              <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="예: 삼성인테리어" />
+
+            <div className="grid gap-3">
+              <div className="grid gap-1.5">
+                <Label>회사명 *</Label>
+                <Input
+                  value={newCompanyName}
+                  onChange={(e) => setNewCompanyName(e.target.value)}
+                  placeholder="예: 삼성인테리어"
+                />
+              </div>
+
+              <div className="grid gap-1.5">
+                <Label>사업자번호 *</Label>
+                <Input
+                  value={newCompanyBizNo}
+                  onChange={(e) => setNewCompanyBizNo(e.target.value)}
+                  placeholder="123-45-67890"
+                />
+                <div className="text-xs text-muted-foreground">
+                  숫자/하이픈만 입력 (예: 123-45-67890)
+                </div>
+              </div>
+
+              <div className="grid gap-1.5">
+                <Label>대표자명</Label>
+                <Input
+                  value={newCompanyCeoName}
+                  onChange={(e) => setNewCompanyCeoName(e.target.value)}
+                  placeholder="예: 홍길동"
+                />
+              </div>
+
+              <div className="grid gap-1.5">
+                <Label>주소</Label>
+                <Input
+                  value={newCompanyAddress}
+                  onChange={(e) => setNewCompanyAddress(e.target.value)}
+                  placeholder="예: 서울시 ..."
+                />
+              </div>
+
+              <div className="grid gap-1.5">
+                <Label>전화</Label>
+                <Input
+                  value={newCompanyPhone}
+                  onChange={(e) => setNewCompanyPhone(e.target.value)}
+                  placeholder="예: 02-1234-5678"
+                />
+              </div>
             </div>
+
             <DialogFooter>
-              <Button variant="secondary" onClick={() => setAddOpen(false)}>취소</Button>
-              <Button onClick={handleCreate} disabled={!canCreate}>추가</Button>
+              <Button variant="secondary" onClick={() => setAddOpen(false)}>
+                취소
+              </Button>
+              <Button onClick={handleCreate} disabled={!canCreate}>
+                추가
+              </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
 
+        {/* Detail Sheet */}
         <CompanyDetailSheet
           company={selectedCompany}
           open={sheetOpen}

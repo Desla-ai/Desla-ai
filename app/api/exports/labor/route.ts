@@ -187,10 +187,12 @@ type WageLedgerWorkerRow = {
 export async function GET(req: NextRequest) {
     const sp = req.nextUrl.searchParams;
     const companyId = String(sp.get("companyId") ?? "").trim();
+    const siteId = String(sp.get("siteId") ?? "").trim(); // ✅ optional
     const periodStart = String(sp.get("periodStart") ?? "").trim();
     const periodEnd = String(sp.get("periodEnd") ?? "").trim();
     const docType = String(sp.get("docType") ?? "").toUpperCase();
     const format = String(sp.get("format") ?? "").toLowerCase();
+
 
     if (!companyId) return jsonError("companyId is required", 400);
     if (!isYmd(periodStart) || !isYmd(periodEnd)) return jsonError("periodStart/periodEnd must be YYYY-MM-DD", 400);
@@ -243,16 +245,44 @@ export async function GET(req: NextRequest) {
         bank_holder: profile?.bank_holder ?? "",
     };
 
-    // Sites under company
-    const { data: sites, error: sErr } = await supabaseAdmin
-        .from("sites")
-        .select("id,name,company_id")
-        .eq("office_id", session.officeId)
-        .eq("company_id", companyId);
-    if (sErr) return jsonError(sErr.message, 500);
+    // Sites under company (or a specific site)
+    let sites: any[] = [];
 
-    const siteIds = (sites ?? []).map((x: any) => String(x.id));
+    if (siteId) {
+        // ✅ 현장별 모드: siteId가 회사(companyId)에 연결된 현장인지까지 검증
+        const { data: oneSite, error: oneErr } = await supabaseAdmin
+            .from("sites")
+            .select("id,name,company_id,office_id")
+            .eq("office_id", session.officeId)
+            .eq("id", siteId)
+            .maybeSingle();
+
+        if (oneErr) return jsonError(oneErr.message, 500);
+        if (!oneSite) return jsonError("Site not found", 404);
+
+        // companyId와의 정합성 강제 (엉뚱한 회사+현장 조합 방지)
+        if (String(oneSite.company_id ?? "") !== String(companyId)) {
+            return jsonError("siteId does not belong to this company", 400);
+        }
+
+        sites = [oneSite];
+    } else {
+        // ✅ 회사별 모드: 회사에 연결된 현장 전체
+        const { data: manySites, error: sErr } = await supabaseAdmin
+            .from("sites")
+            .select("id,name,company_id")
+            .eq("office_id", session.officeId)
+            .eq("company_id", companyId);
+
+        if (sErr) return jsonError(sErr.message, 500);
+        sites = manySites ?? [];
+    }
+
+    const siteIds = sites.map((x: any) => String(x.id));
     if (siteIds.length === 0) return jsonError("No sites linked to this company", 409);
+    // ✅ 현장별 모드일 때 표시용 라벨 (문서 상단에만 사용)
+    const siteLabel = siteId ? safeStr(sites?.[0]?.name ?? "") : "";
+
 
     // Daily settlements in period for these sites
     const { data: dsRows, error: dsErr } = await supabaseAdmin
@@ -352,8 +382,15 @@ export async function GET(req: NextRequest) {
 
             ws.addRow(["회사(청구대상)", company.name]);
             ws.addRow(["기간", `${periodStart} ~ ${periodEnd}`]);
+
+            // ✅ 현장별 모드에서만 1줄 추가
+            if (siteId) {
+                ws.addRow(["현장", siteLabel]);
+            }
+
             ws.addRow(["공급자(사무소)", officeProfile.supplier_name]);
             ws.addRow([]);
+
 
             // Header
             const header = ["직종", "공수합", "단가(가중평균)", "노무비(총액)"];
@@ -372,7 +409,9 @@ export async function GET(req: NextRequest) {
             ];
 
             const buf = await wb.xlsx.writeBuffer();
-            const filename = `INVOICE_${periodStart}_${periodEnd}.xlsx`;
+            const filename = siteId
+                ? `INVOICE_${periodStart}_${periodEnd}_${siteId}.xlsx`
+                : `INVOICE_${periodStart}_${periodEnd}.xlsx`;
             return new NextResponse(buf as ArrayBuffer, {
                 status: 200,
                 headers: {
@@ -404,7 +443,15 @@ export async function GET(req: NextRequest) {
 
         drawText(page, `출력일자(KST): ${kstDateYmd()}`, M, y, fontReg, FONT_SIZE);
         drawText(page, `기간: ${periodStart} ~ ${periodEnd}`, M + 260, y, fontReg, FONT_SIZE);
-        y -= 18;
+        y -= 16;
+
+        // ✅ 현장별 모드에서만 1줄 추가
+        if (siteId) {
+            drawText(page, `현장: ${siteLabel}`, M, y, fontReg, FONT_SIZE);
+            y -= 16;
+        } else {
+            y -= 2; // 기존 여백감 유지(미세 조정)
+        }
 
         drawHLine(page, M, y, CONTENT_W);
         y -= 18;
@@ -488,7 +535,10 @@ export async function GET(req: NextRequest) {
         const pdfArrayBuffer = new ArrayBuffer(pdfBytes.byteLength);
         new Uint8Array(pdfArrayBuffer).set(pdfBytes);
 
-        const filename = `INVOICE_${periodStart}_${periodEnd}.pdf`;
+        const filename = siteId
+            ? `INVOICE_${periodStart}_${periodEnd}_${siteId}.pdf`
+            : `INVOICE_${periodStart}_${periodEnd}.pdf`;
+
         return new NextResponse(pdfArrayBuffer, {
             status: 200,
             headers: {
@@ -630,8 +680,15 @@ export async function GET(req: NextRequest) {
 
         ws.addRow(["회사(청구대상)", company.name]);
         ws.addRow(["기간", `${periodStart} ~ ${periodEnd}`]);
+
+        // ✅ 현장별 모드에서만 1줄 추가
+        if (siteId) {
+            ws.addRow(["현장", siteLabel]);
+        }
+
         ws.addRow(["출력일자(KST)", kstDateYmd()]);
         ws.addRow([]);
+
 
         ws.addRow(["성명", "연락처", "직종", "공수", "총지급", "공제(수수료)", "실지급", "신분증", "신분증사본URL"]);
 
@@ -662,7 +719,10 @@ export async function GET(req: NextRequest) {
         ];
 
         const buf = await wb.xlsx.writeBuffer();
-        const filename = `WAGE_LEDGER_${periodStart}_${periodEnd}.xlsx`;
+        const filename = siteId
+            ? `WAGE_LEDGER_${periodStart}_${periodEnd}_${siteId}.xlsx`
+            : `WAGE_LEDGER_${periodStart}_${periodEnd}.xlsx`;
+
         return new NextResponse(buf as ArrayBuffer, {
             status: 200,
             headers: {
@@ -697,8 +757,15 @@ export async function GET(req: NextRequest) {
         drawText(page, `회사: ${safeStr(company.name)}`, M, y, fontReg, FONT_SIZE);
         drawText(page, `기간: ${periodStart} ~ ${periodEnd}`, M + 260, y, fontReg, FONT_SIZE);
         y -= 16;
+
         drawText(page, `출력일자(KST): ${kstDateYmd()}`, M, y, fontReg, FONT_SIZE);
         y -= 16;
+
+        // ✅ 현장별 모드에서만 1줄 추가
+        if (siteId) {
+            drawText(page, `현장: ${siteLabel}`, M, y, fontReg, FONT_SIZE);
+            y -= 16;
+        }
 
         drawHLine(page, M, y, CONTENT_W);
         y -= 14;
@@ -804,7 +871,10 @@ export async function GET(req: NextRequest) {
     const pdfArrayBuffer = new ArrayBuffer(pdfBytes.byteLength);
     new Uint8Array(pdfArrayBuffer).set(pdfBytes);
 
-    const filename = `WAGE_LEDGER_${periodStart}_${periodEnd}.pdf`;
+    const filename = siteId
+        ? `WAGE_LEDGER_${periodStart}_${periodEnd}_${siteId}.pdf`
+        : `WAGE_LEDGER_${periodStart}_${periodEnd}.pdf`;
+
     return new NextResponse(pdfArrayBuffer, {
         status: 200,
         headers: {

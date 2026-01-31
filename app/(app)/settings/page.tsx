@@ -52,17 +52,40 @@ import {
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 
-function coerceSnapshots(value: unknown): AppSnapshot[] {
-  // getSnapshots()가 배열을 반환하는 게 가장 이상적이지만,
-  // 과도기(로컬스토리지/서버 전환)에서 형태가 섞일 수 있으므로 여기서 방어한다.
-  if (Array.isArray(value)) return value as AppSnapshot[]
+type OfficeProfileForm = {
+  supplierName: string
+  bizNo: string
+  ceoName: string
+  address: string
+  bizType: string
+  bizItem: string
+  phone: string
+  bankName: string
+  bankAccount: string
+  bankHolder: string
+}
 
-  // { snapshots: [...] } 형태
+function coerceSnapshots(value: unknown): AppSnapshot[] {
+  if (Array.isArray(value)) return value as AppSnapshot[]
   if (value && typeof value === "object" && Array.isArray((value as any).snapshots)) {
     return (value as any).snapshots as AppSnapshot[]
   }
-
   return []
+}
+
+function emptyOfficeProfile(): OfficeProfileForm {
+  return {
+    supplierName: "",
+    bizNo: "",
+    ceoName: "",
+    address: "",
+    bizType: "",
+    bizItem: "",
+    phone: "",
+    bankName: "",
+    bankAccount: "",
+    bankHolder: "",
+  }
 }
 
 export default function SettingsPage() {
@@ -79,7 +102,7 @@ export default function SettingsPage() {
   const [editingTemplate, setEditingTemplate] = useState<string | null>(null)
   const [editTemplateContent, setEditTemplateContent] = useState("")
 
-  // Snapshot management (✅ 초기값을 무조건 배열로 정규화)
+  // Snapshot management
   const [snapshots, setSnapshots] = useState<AppSnapshot[]>(() => coerceSnapshots(getSnapshots()))
   const [newSnapshotTitle, setNewSnapshotTitle] = useState("")
   const [saveSnapshotDialogOpen, setSaveSnapshotDialogOpen] = useState(false)
@@ -87,14 +110,21 @@ export default function SettingsPage() {
   const [selectedSnapshot, setSelectedSnapshot] = useState<AppSnapshot | null>(null)
   const [deleteSnapshotId, setDeleteSnapshotId] = useState<string | null>(null)
 
-  // ✅ 초대코드 발급 UI 상태
+  // Invite code UI state
   const [inviteCode, setInviteCode] = useState<string>("")
   const [inviteExpiresAt, setInviteExpiresAt] = useState<string>("")
   const [isIssuingInvite, setIsIssuingInvite] = useState(false)
 
+  // ✅ Office profile (company/supplier) form state
+  const [officeProfile, setOfficeProfile] = useState<OfficeProfileForm>(() => emptyOfficeProfile())
+  const [isLoadingOfficeProfile, setIsLoadingOfficeProfile] = useState(false)
+  const [isSavingOfficeProfile, setIsSavingOfficeProfile] = useState(false)
+
   const totalWorkersInSnapshot = useMemo(() => {
-    // snapshots.map 관련 크래시 예방: snapshots는 항상 배열
-    return snapshots.reduce((acc, s) => acc + (s?.metrics?.waitingWorkers ?? 0) + (s?.metrics?.assignedWorkers ?? 0), 0)
+    return snapshots.reduce(
+      (acc, s) => acc + (s?.metrics?.waitingWorkers ?? 0) + (s?.metrics?.assignedWorkers ?? 0),
+      0
+    )
   }, [snapshots])
 
   const handleSave = () => {
@@ -120,7 +150,6 @@ export default function SettingsPage() {
     setEditTemplateContent("")
   }
 
-  // ✅ getSnapshots가 향후 async로 바뀌어도 SettingsPage는 깨지지 않도록 흡수
   const refreshSnapshots = async () => {
     try {
       const result = await Promise.resolve(getSnapshots() as any)
@@ -132,9 +161,82 @@ export default function SettingsPage() {
     }
   }
 
+  // ✅ load office profile
+  const loadOfficeProfile = async () => {
+    setIsLoadingOfficeProfile(true)
+    try {
+      const res = await fetch("/api/settings/office-profile", { method: "GET" })
+      const json = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        const msg = json?.error ?? `회사 정보를 불러오지 못했습니다 (${res.status})`
+        toast.error(msg)
+        return
+      }
+
+      const p = json?.officeProfile ?? {}
+      setOfficeProfile({
+        supplierName: String(p.supplierName ?? ""),
+        bizNo: String(p.bizNo ?? ""),
+        ceoName: String(p.ceoName ?? ""),
+        address: String(p.address ?? ""),
+        bizType: String(p.bizType ?? ""),
+        bizItem: String(p.bizItem ?? ""),
+        phone: String(p.phone ?? ""),
+        bankName: String(p.bankName ?? ""),
+        bankAccount: String(p.bankAccount ?? ""),
+        bankHolder: String(p.bankHolder ?? ""),
+      })
+    } catch (e) {
+      console.error(e)
+      toast.error("회사 정보를 불러오는 중 오류가 발생했습니다")
+    } finally {
+      setIsLoadingOfficeProfile(false)
+    }
+  }
+
+  const saveOfficeProfile = async () => {
+    setIsSavingOfficeProfile(true)
+    try {
+      const res = await fetch("/api/settings/office-profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(officeProfile),
+      })
+      const json = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        const msg = json?.error ?? `회사 정보 저장 실패 (${res.status})`
+        toast.error(msg)
+        return
+      }
+
+      toast.success("회사 정보가 저장되었습니다")
+      // 서버 값으로 다시 동기화(공백 트림 등)
+      const p = json?.officeProfile ?? {}
+      setOfficeProfile({
+        supplierName: String(p.supplierName ?? ""),
+        bizNo: String(p.bizNo ?? ""),
+        ceoName: String(p.ceoName ?? ""),
+        address: String(p.address ?? ""),
+        bizType: String(p.bizType ?? ""),
+        bizItem: String(p.bizItem ?? ""),
+        phone: String(p.phone ?? ""),
+        bankName: String(p.bankName ?? ""),
+        bankAccount: String(p.bankAccount ?? ""),
+        bankHolder: String(p.bankHolder ?? ""),
+      })
+    } catch (e) {
+      console.error(e)
+      toast.error("회사 정보 저장 중 오류가 발생했습니다")
+    } finally {
+      setIsSavingOfficeProfile(false)
+    }
+  }
+
   useEffect(() => {
-    // 첫 렌더 후 한 번 더 안전하게 갱신(스토어 hydrate 타이밍 이슈 방어)
     void refreshSnapshots()
+    void loadOfficeProfile()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -220,12 +322,10 @@ export default function SettingsPage() {
   return (
     <AppShell title="설정">
       <div className="flex h-full flex-col">
-        {/* Header */}
         <div className="shrink-0 border-b border-border bg-background px-6 py-4">
           <h1 className="text-2xl font-semibold">설정</h1>
         </div>
 
-        {/* Content area with centered max-width container */}
         <ScrollArea className="flex-1">
           <div className="mx-auto w-full max-w-4xl px-6 py-6">
             <Tabs defaultValue="profile" className="w-full">
@@ -254,6 +354,7 @@ export default function SettingsPage() {
 
               {/* Profile Tab */}
               <TabsContent value="profile" className="space-y-6">
+                {/* Card 1: Profile */}
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">프로필 설정</CardTitle>
@@ -274,6 +375,161 @@ export default function SettingsPage() {
                     </div>
                     <div className="pt-2">
                       <Button onClick={handleSave}>저장</Button>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Card 2: Company / Supplier info */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">회사 정보(공급자)</CardTitle>
+                    <CardDescription>
+                      노무비 청구서 PDF의 ‘공급자’ 영역에 표시됩니다.
+                    </CardDescription>
+                  </CardHeader>
+
+                  <CardContent className="flex flex-col gap-4">
+                    {isLoadingOfficeProfile ? (
+                      <div className="text-sm text-muted-foreground">불러오는 중...</div>
+                    ) : null}
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="supplierName">상호</Label>
+                      <Input
+                        id="supplierName"
+                        className="max-w-md"
+                        value={officeProfile.supplierName}
+                        onChange={(e) =>
+                          setOfficeProfile((p) => ({ ...p, supplierName: e.target.value }))
+                        }
+                        placeholder="예: 대한인력"
+                      />
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="bizNo">등록번호(사업자등록번호)</Label>
+                      <Input
+                        id="bizNo"
+                        className="max-w-md"
+                        value={officeProfile.bizNo}
+                        onChange={(e) =>
+                          setOfficeProfile((p) => ({ ...p, bizNo: e.target.value }))
+                        }
+                        placeholder="예: 111-22-33333"
+                      />
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="ceoName">대표자</Label>
+                      <Input
+                        id="ceoName"
+                        className="max-w-md"
+                        value={officeProfile.ceoName}
+                        onChange={(e) =>
+                          setOfficeProfile((p) => ({ ...p, ceoName: e.target.value }))
+                        }
+                        placeholder="예: 홍길동"
+                      />
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="address">주소</Label>
+                      <Input
+                        id="address"
+                        className="max-w-2xl"
+                        value={officeProfile.address}
+                        onChange={(e) =>
+                          setOfficeProfile((p) => ({ ...p, address: e.target.value }))
+                        }
+                        placeholder="예: 서울시 ..."
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div className="grid gap-2">
+                        <Label htmlFor="bizType">업태</Label>
+                        <Input
+                          id="bizType"
+                          value={officeProfile.bizType}
+                          onChange={(e) =>
+                            setOfficeProfile((p) => ({ ...p, bizType: e.target.value }))
+                          }
+                          placeholder="예: 서비스"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="bizItem">종목</Label>
+                        <Input
+                          id="bizItem"
+                          value={officeProfile.bizItem}
+                          onChange={(e) =>
+                            setOfficeProfile((p) => ({ ...p, bizItem: e.target.value }))
+                          }
+                          placeholder="예: 잡역"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="officePhone">연락처</Label>
+                      <Input
+                        id="officePhone"
+                        className="max-w-md"
+                        value={officeProfile.phone}
+                        onChange={(e) =>
+                          setOfficeProfile((p) => ({ ...p, phone: e.target.value }))
+                        }
+                        placeholder="예: 02-123-4567 / 010-1234-5678"
+                      />
+                    </div>
+
+                    <Separator />
+
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                      <div className="grid gap-2">
+                        <Label htmlFor="bankName">은행명</Label>
+                        <Input
+                          id="bankName"
+                          value={officeProfile.bankName}
+                          onChange={(e) =>
+                            setOfficeProfile((p) => ({ ...p, bankName: e.target.value }))
+                          }
+                          placeholder="예: 농협"
+                        />
+                      </div>
+                      <div className="grid gap-2 md:col-span-2">
+                        <Label htmlFor="bankAccount">계좌번호</Label>
+                        <Input
+                          id="bankAccount"
+                          value={officeProfile.bankAccount}
+                          onChange={(e) =>
+                            setOfficeProfile((p) => ({ ...p, bankAccount: e.target.value }))
+                          }
+                          placeholder="예: 111-22-333"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="bankHolder">예금주</Label>
+                      <Input
+                        id="bankHolder"
+                        className="max-w-md"
+                        value={officeProfile.bankHolder}
+                        onChange={(e) =>
+                          setOfficeProfile((p) => ({ ...p, bankHolder: e.target.value }))
+                        }
+                        placeholder="예: 대한인력"
+                      />
+                    </div>
+
+                    <div className="pt-2 flex items-center gap-2">
+                      <Button onClick={saveOfficeProfile} disabled={isSavingOfficeProfile}>
+                        {isSavingOfficeProfile ? "저장 중..." : "저장"}
+                      </Button>
+                      <Button variant="outline" onClick={loadOfficeProfile} disabled={isSavingOfficeProfile}>
+                        다시 불러오기
+                      </Button>
                     </div>
                   </CardContent>
                 </Card>
@@ -441,7 +697,6 @@ export default function SettingsPage() {
 
               {/* System Tab */}
               <TabsContent value="system" className="space-y-6">
-                {/* ✅ 초대코드 발급 */}
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base flex items-center gap-2">
@@ -493,7 +748,6 @@ export default function SettingsPage() {
                   </CardContent>
                 </Card>
 
-                {/* 기존 시스템 설정 */}
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">시스템 설정</CardTitle>

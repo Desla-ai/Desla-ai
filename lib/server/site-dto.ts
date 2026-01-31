@@ -6,6 +6,9 @@ export function toSiteDTO(s: any) {
     id: s.id,
     officeId: s.office_id,
 
+    // ✅ 회사(건설사) 연결 (필수 정책)
+    companyId: s.company_id ?? null,
+
     name: s.name ?? "",
     address: s.address ?? "",
 

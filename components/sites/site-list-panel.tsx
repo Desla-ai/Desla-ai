@@ -30,6 +30,7 @@ import { formatDateRange, formatPhone } from "@/lib/format"
 import { Search, MessageSquare, X, Plus, Building2, Save } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { CompanyPickerDialog } from "@/components/companies/company-picker-dialog"
 
 interface SiteListPanelProps {
   sites: Site[]
@@ -39,7 +40,7 @@ interface SiteListPanelProps {
   onSelectSite: (siteId: string) => void
   checkedSiteIds: string[]
   onCheckedSiteIdsChange: (ids: string[]) => void
-  onAddSite?: (site: Omit<Site, "id">) => void
+  onAddSite?: (site: Omit<Site, "id"> & { companyId: string }) => void
   onAddWorker?: () => void // Declare the onAddWorker variable
 }
 
@@ -77,7 +78,7 @@ export function SiteListPanel({
   const [selectedTemplate, setSelectedTemplate] = useState("default")
   const [smsMessage, setSmsMessage] = useState("")
   const [customTemplates, setCustomTemplates] = useState(smsTemplates)
-  
+
   // New Site Dialog with full fields
   const [newSiteDialogOpen, setNewSiteDialogOpen] = useState(false)
   const [newSiteName, setNewSiteName] = useState("")
@@ -88,6 +89,12 @@ export function SiteListPanel({
   const [newSiteEndDate, setNewSiteEndDate] = useState("")
   const [newSitePlannedWorkers, setNewSitePlannedWorkers] = useState("0")
   const [newSiteStatus, setNewSiteStatus] = useState<StatusType>("배차대기")
+
+  // ✅ New Site: company picker (required)
+  const [companyPickerOpen, setCompanyPickerOpen] = useState(false)
+  const [newSiteCompanyId, setNewSiteCompanyId] = useState("")
+  const [newSiteCompanyName, setNewSiteCompanyName] = useState("")
+  const [newSiteCompanyBizNo, setNewSiteCompanyBizNo] = useState("")
 
   const filteredSites = sites.filter((site) => {
     const matchesSearch = site.name.toLowerCase().includes(search.toLowerCase())
@@ -103,7 +110,7 @@ export function SiteListPanel({
     }
   }
 
-    const getAssignedCountForSite = (siteId: string) => {
+  const getAssignedCountForSite = (siteId: string) => {
     // Worker 필드명은 camel/snake 혼용 가능성이 있어 둘 다 대응
     return workers.filter((w) => {
       const assigned = (w as any).assignedSiteId ?? (w as any).assigned_site_id ?? null
@@ -193,6 +200,10 @@ export function SiteListPanel({
   }
 
   const handleAddNewSite = () => {
+    if (!newSiteCompanyId) {
+      toast.error("건설사(업체)를 선택해 주세요")
+      return
+    }
     if (!newSiteName.trim() || !newSiteAddress.trim()) {
       toast.error("현장명과 주소를 입력해주세요")
       return
@@ -201,9 +212,9 @@ export function SiteListPanel({
       toast.error("기간을 입력해주세요")
       return
     }
-    
+
     const plannedWorkers = Number.parseInt(newSitePlannedWorkers) || 0
-    
+
     onAddSite?.({
       name: newSiteName.trim(),
       address: newSiteAddress.trim(),
@@ -216,6 +227,7 @@ export function SiteListPanel({
       assignedWorkers: 0,
       todayRequired: plannedWorkers,
       progress: 0,
+      companyId: newSiteCompanyId, // ✅ 추가
     })
     toast.success("새 현장이 등록되었습니다")
     setNewSiteDialogOpen(false)
@@ -228,6 +240,9 @@ export function SiteListPanel({
     setNewSiteEndDate("")
     setNewSitePlannedWorkers("0")
     setNewSiteStatus("배차대기")
+    setNewSiteCompanyId("")
+    setNewSiteCompanyName("")
+    setNewSiteCompanyBizNo("")
   }
 
   const checkedSites = sites.filter((site) => checkedSiteIds.includes(site.id))
@@ -238,7 +253,7 @@ export function SiteListPanel({
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold">현장</h2>
         </div>
-        
+
         {/* Action Button - Site registration only */}
         <div className="mb-4">
           <Button
@@ -279,7 +294,7 @@ export function SiteListPanel({
 
       {/* Bulk Action Bar */}
       <div className="shrink-0 flex items-center justify-between gap-2 border-b border-border bg-muted/50 px-4 py-3">
-        <Badge 
+        <Badge
           variant={checkedSiteIds.length > 0 ? "default" : "secondary"}
           className={cn(
             "text-sm font-semibold px-3 py-1",
@@ -365,20 +380,20 @@ export function SiteListPanel({
         </div>
       </ScrollArea>
 
-{/* SMS Dialog with Per-Site Template System */}
-  <Dialog open={smsDialogOpen} onOpenChange={setSmsDialogOpen}>
-  <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
-  <DialogHeader>
-  <DialogTitle>문자 발송</DialogTitle>
-  <DialogDescription>
-              {checkedSites.length > 1 
+      {/* SMS Dialog with Per-Site Template System */}
+      <Dialog open={smsDialogOpen} onOpenChange={setSmsDialogOpen}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle>문자 발송</DialogTitle>
+            <DialogDescription>
+              {checkedSites.length > 1
                 ? "선택한 현장별 템플릿으로 나누어 발송합니다."
                 : "선택한 현장의 작업자들에게 문자를 발송합니다."}
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-4 py-4">
             <div>
-{checkedSites.length > 1 ? (
+              {checkedSites.length > 1 ? (
                 <>
                   <p className="mb-2 text-sm font-medium">현장별 발송 미리보기 ({checkedSites.length}개 현장)</p>
                   <div className="max-h-[200px] overflow-y-auto space-y-2 border border-border rounded-lg p-2">
@@ -408,7 +423,7 @@ export function SiteListPanel({
                 </>
               )}
             </div>
-            
+
             <div>
               <Label htmlFor="template-select" className="mb-2 block text-sm font-medium">
                 템플릿 선택
@@ -458,9 +473,9 @@ export function SiteListPanel({
             <Button variant="outline" onClick={() => setSmsDialogOpen(false)}>
               취소
             </Button>
-<Button onClick={handleSendSms} disabled={!smsMessage.trim() || isSendingSms}>
-  {isSendingSms ? "발송 중..." : "발송"}
-  </Button>
+            <Button onClick={handleSendSms} disabled={!smsMessage.trim() || isSendingSms}>
+              {isSendingSms ? "발송 중..." : "발송"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -493,7 +508,44 @@ export function SiteListPanel({
                 className="mt-1.5"
               />
             </div>
-            
+            {/* Company Picker (required) */}
+            <div>
+              <Label>건설사(업체) *</Label>
+
+              <div className="mt-1.5 flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setCompanyPickerOpen(true)}
+                >
+                  {newSiteCompanyId ? "회사 변경" : "회사 선택"}
+                </Button>
+
+                {newSiteCompanyId ? (
+                  <div className="min-w-0 text-sm">
+                    <div className="truncate font-medium">{newSiteCompanyName}</div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      사업자번호: {newSiteCompanyBizNo}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    회사를 선택해야 현장을 등록할 수 있습니다.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <CompanyPickerDialog
+              open={companyPickerOpen}
+              onOpenChange={setCompanyPickerOpen}
+              onPick={(c: any) => {
+                setNewSiteCompanyId(String(c.id))
+                setNewSiteCompanyName(String(c.name ?? ""))
+                setNewSiteCompanyBizNo(String(c.biz_no ?? ""))
+              }}
+            />
+
             {/* Date Range */}
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -517,7 +569,7 @@ export function SiteListPanel({
                 />
               </div>
             </div>
-            
+
             <div>
               <Label htmlFor="site-planned-workers">기본 계획 인원</Label>
               <Input
@@ -530,7 +582,7 @@ export function SiteListPanel({
                 className="mt-1.5"
               />
             </div>
-            
+
             <div>
               <Label htmlFor="site-status">상태</Label>
               <Select value={newSiteStatus} onValueChange={(v) => setNewSiteStatus(v as StatusType)}>

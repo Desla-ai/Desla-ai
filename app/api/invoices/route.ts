@@ -143,94 +143,146 @@ export async function POST(req: Request) {
     if (!session) return jsonError("Unauthorized", 401)
 
     const body = (await req.json()) as CreateBody
-    if (!body?.siteId) return jsonError("siteId is required", 400)
-    if (!body?.contractorName?.trim()) return jsonError("contractorName is required", 400)
-    if (!Array.isArray(body?.lineItems) || body.lineItems.length === 0) return jsonError("lineItems is required", 400)
 
-    assertAttachmentScope(session.officeId, body.attachments)
+    // 0) 기본 필수값 검증
+    const siteId = String(body?.siteId ?? "").trim()
+    if (!siteId) return jsonError("siteId is required", 400)
 
-    const normalizedItems = body.lineItems.map((li) => {
-      const quantity = Number(li.quantity ?? 0)
-      const unitPrice = Math.round(Number(li.unitPrice ?? 0))
-      const amount = Math.round(Number(li.amount ?? quantity * unitPrice))
-      return {
-        category: li.category,
-        description: li.description ?? "",
-        quantity,
-        unit_price: unitPrice,
-        amount,
-      }
-    })
+    const contractorName = String(body?.contractorName ?? "").trim()
+    if (!contractorName) return jsonError("contractorName is required", 400)
 
-    const { subtotal, tax, total } = computeTotals(normalizedItems.map(x => ({ amount: Number(x.amount) })))
+    const inItems = Array.isArray(body?.lineItems) ? body.lineItems : []
+    if (inItems.length === 0) return jsonError("lineItems is required", 400)
 
-    // 유니크 충돌 대비 재시도
+    // 1) ✅ siteId가 현재 office 소속인지 검증 (이거 빠지면 '상관없는 청구서' 바로 발생)
+    const { data: site, error: siteErr } = await supabaseAdmin
+      .from("sites")
+      .select("id, office_id, name")
+      .eq("id", siteId)
+      .eq("office_id", session.officeId)
+      .maybeSingle()
+
+    if (siteErr) return jsonError(siteErr.message, 500)
+    if (!site) return jsonError("Invalid siteId or access denied", 403)
+
+    // 2) ✅ attachments 스코프 검증 (jsonb 배열)
+    const attachments = Array.isArray(body?.attachments) ? body.attachments : []
+    try {
+      assertAttachmentScope(session.officeId, attachments)
+    } catch (e: any) {
+      return jsonError(e?.message ?? "Invalid attachment scope", 400)
+    }
+
+    // 3) ✅ lineItems 정규화 + amount 서버 재계산 (numeric/bigint 스키마에 맞춤)
+    const normalized = inItems
+      .map((li: any) => {
+        const category = li?.category
+        const description = String(li?.description ?? "").trim()
+
+        // quantity: numeric
+        const quantity = Math.max(0, Number(li?.quantity ?? 0))
+
+        // unit_price/amount: bigint (정수로 강제)
+        const unitPrice = Math.max(0, Math.round(Number(li?.unitPrice ?? 0)))
+
+        if (!description) return null
+
+        const amount = Math.round(quantity * unitPrice)
+
+        return { category, description, quantity, unitPrice, amount }
+      })
+      .filter(Boolean) as Array<{
+        category: "인건비" | "장비" | "자재" | "기타"
+        description: string
+        quantity: number
+        unitPrice: number
+        amount: number
+      }>
+
+    if (normalized.length === 0) return jsonError("At least 1 line item is required", 400)
+
+    // 4) ✅ totals 계산(클라 amount 신뢰 X)
+    const { subtotal, tax, total } = computeTotals(normalized)
+
+    // 5) ✅ invoiceNumber 생성(레이스 간이 대응: 중복시 재시도)
+    //    + invoices.office_id는 반드시 session.officeId
     let lastErr: any = null
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const invoiceNumber = await nextInvoiceNumber(session.officeId)
 
-        const { data: inv, error: invErr } = await supabaseAdmin
+        // invoices insert
+        const { data: invoiceRow, error: invErr } = await supabaseAdmin
           .from("invoices")
           .insert({
             office_id: session.officeId,
-            site_id: body.siteId,
+            site_id: siteId,
             invoice_number: invoiceNumber,
-            contractor_name: body.contractorName.trim(),
+            contractor_name: contractorName,
             status: "초안",
-            issue_date: null,
-            due_date: null,
+            notes: String(body?.notes ?? ""),
             subtotal,
             tax,
             total,
-            notes: body.notes ?? "",
-            attachments: body.attachments ?? [],
+            attachments, // jsonb
           })
-          .select("*, sites(name)")
+          .select("id, office_id, site_id, invoice_number, contractor_name, status, issue_date, due_date, subtotal, tax, total, notes, attachments, created_at, updated_at")
           .single()
 
         if (invErr) throw invErr
 
-        const { data: items, error: itemsErr } = await supabaseAdmin
-          .from("invoice_line_items")
-          .insert(normalizedItems.map((x) => ({ invoice_id: inv.id, ...x })))
-          .select("*")
+        // invoice_line_items insert
+        const { error: liErr } = await supabaseAdmin.from("invoice_line_items").insert(
+          normalized.map((li) => ({
+            invoice_id: invoiceRow.id,
+            category: li.category,
+            description: li.description,
+            quantity: li.quantity,            // numeric
+            unit_price: li.unitPrice,         // bigint
+            amount: li.amount,                // bigint
+          }))
+        )
+        if (liErr) throw liErr
 
-        if (itemsErr) throw itemsErr
-
+        // 응답: BillingPage가 기대하는 형태로 맞추기
         return NextResponse.json({
           invoice: {
-            id: inv.id,
-            invoiceNumber: inv.invoice_number,
-            siteId: inv.site_id,
-            siteName: inv.sites?.name ?? "",
-            contractorName: inv.contractor_name,
-            status: inv.status,
-            issueDate: inv.issue_date ?? "",
-            dueDate: inv.due_date ?? "",
-            lineItems: (items ?? []).map((it: any) => ({
-              id: it.id,
-              category: it.category,
-              description: it.description ?? "",
-              quantity: Number(it.quantity ?? 0),
-              unitPrice: Number(it.unit_price ?? 0),
-              amount: Number(it.amount ?? 0),
+            id: invoiceRow.id,
+            invoiceNumber: invoiceRow.invoice_number,
+            siteId: invoiceRow.site_id,
+            siteName: site?.name ?? "", // 있으면 넣어주면 프론트에서 좋아함
+            contractorName: invoiceRow.contractor_name,
+            status: invoiceRow.status,
+            issueDate: invoiceRow.issue_date ?? null,
+            dueDate: invoiceRow.due_date ?? null,
+            lineItems: normalized.map((li, idx) => ({
+              id: `tmp-${idx}`, // DB에서 line_items를 다시 select해서 내려주면 더 좋음
+              category: li.category,
+              description: li.description,
+              quantity: li.quantity,
+              unitPrice: li.unitPrice,
+              amount: li.amount,
             })),
-            subtotal: Number(inv.subtotal ?? 0),
-            tax: Number(inv.tax ?? 0),
-            total: Number(inv.total ?? 0),
-            notes: inv.notes ?? "",
-            attachments: inv.attachments ?? [],
-            createdAt: inv.created_at,
-            updatedAt: inv.updated_at,
-          }
+            subtotal: invoiceRow.subtotal,
+            tax: invoiceRow.tax,
+            total: invoiceRow.total,
+            notes: invoiceRow.notes,
+            attachments: invoiceRow.attachments ?? [],
+            createdAt: invoiceRow.created_at,
+            updatedAt: invoiceRow.updated_at,
+          },
         })
-      } catch (err: any) {
-        lastErr = err
+      } catch (e: any) {
+        lastErr = e
+        const msg = String(e?.message ?? e)
+        // 유니크 인덱스 걸면 여기서 중복 뜨면 재시도 가능
+        if (msg.toLowerCase().includes("duplicate") || msg.toLowerCase().includes("unique")) continue
+        break
       }
     }
 
     return jsonError(lastErr?.message ?? "Failed to create invoice", 500)
+
   } catch (e: any) {
     return jsonError(e?.message ?? "Failed to create invoice", 500)
   }
