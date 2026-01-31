@@ -202,6 +202,10 @@ function extractAttachmentPaths(attachments: any): string[] {
 // 현재 출력 참고: https://www.genspark.ai/api/files/s/Oh7MIHcA [Source]
 
 
+// LABOR_INVOICE PDF (월 노무비 청구서) — 11월 레퍼런스(zW35ouFC) 기준 재작성
+// Reference: https://www.genspark.ai/api/files/s/zW35ouFC [Source]
+// Current bug example: https://www.genspark.ai/api/files/s/vLAN2Dps [Source]
+
 export function renderLaborInvoicePDF({
   pdfDoc,
   fontReg,
@@ -223,93 +227,38 @@ export function renderLaborInvoicePDF({
   officeProfile: any;
   company: any;
 }) {
-  // A4 landscape
-  const page = pdfDoc.addPage([842, 595]);
+  // =========================
+  // 0) Page: A4 Portrait
+  // =========================
+  const PAGE_W = 595.28;
+  const PAGE_H = 841.89;
+  const page = pdfDoc.addPage([PAGE_W, PAGE_H]);
 
-  // -------------------------
-  // Constants / colors (use file-level constants if exist)
-  // -------------------------
-  const MM = 24;
-  const W = page.getWidth();
-  const H = page.getHeight();
+  // =========================
+  // 1) Styling / utils
+  // =========================
+  const C_TEXT = rgb(0.12, 0.12, 0.12);
+  const C_MUTED = rgb(0.45, 0.45, 0.45);
+  const C_LINE = rgb(0.70, 0.70, 0.70);
+  const C_LINE_SOFT = rgb(0.88, 0.88, 0.88);
+  const C_SUM_FILL = rgb(1.0, 0.98, 0.80);
 
-  // IMPORTANT: create top margin for title so it NEVER overlaps top blocks
-  const TITLE_H = 26;
-  const TITLE_GAP = 8; // gap between title and top blocks
+  const TH_OUTER = 1.0;
+  const TH_MAJOR = 0.8;
+  const TH_MINOR = 0.5;
 
-  // Top blocks
-  const topH = 190;
-  const leftW = 380;
-  const gap = 10;
-  const rightW = (W - MM * 2) - leftW - gap;
+  const M = 20;
+  const W = PAGE_W;
+  const H = PAGE_H;
+  const CONTENT_W = W - M * 2;
 
-  const x0 = MM;
-  const xRight = x0 + leftW + gap;
-
-  // The y of the top blocks is shifted DOWN to avoid title overlap
-  const topY = H - MM - TITLE_H - TITLE_GAP; // <- 핵심: 제목 영역 확보
-  const yTopBox = topY - topH;
-
-  // Grid block below top boxes
-  const GRID_TOP = yTopBox - 12;
-  const GRID_H = 320;
-  const gridY = Math.max(MM, GRID_TOP - GRID_H);
-
-  // -------------------------
-  // Helpers
-  // -------------------------
-  const safe = (v: any, fb = "") => (typeof v === "string" && v.trim() ? v.trim() : fb);
-
-  const isEllipsisLike = (v: any) => {
-    const s = typeof v === "string" ? v.trim() : "";
-    return s === "..." || s === "…";
+  const safe = (v: any, fb = "") => {
+    if (v === null || v === undefined) return fb;
+    const s = String(v);
+    return s.trim() ? s.trim() : fb;
   };
 
-  const cleanText = (v: any) => {
-    if (v === null || v === undefined) return "";
-    if (isEllipsisLike(v)) return "";
-    return String(v);
-  };
-
-  const nnum = (v: any) => {
-    const n = typeof v === "number" ? v : Number(v);
-    return Number.isFinite(n) ? n : 0;
-  };
-
-  // 숫자만 통과 (문자/…/… 등은 null)
-  const toNumberOrNull = (v: any): number | null => {
-    if (v === null || v === undefined) return null;
-    if (typeof v === "number") return Number.isFinite(v) ? v : null;
-
-    if (typeof v === "string") {
-      const s = v.trim();
-      if (!s) return null;
-      if (isEllipsisLike(s)) return null;
-      if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
-      const n = Number(s);
-      return Number.isFinite(n) ? n : null;
-    }
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  };
-
-  // always show 1 decimal for units (1.0)
-  const fmtUnits1 = (v: any) => {
-    const n = typeof v === "number" ? v : Number(v);
-    if (!Number.isFinite(n)) return "";
-    return n.toFixed(1);
-  };
-
-  const formatWon = (v: any) => {
-    const n = nnum(v);
-    try {
-      return Math.round(n).toLocaleString("ko-KR");
-    } catch {
-      return String(Math.round(n));
-    }
-  };
-
-  const kstDateYmd = (d: any) => {
+  const kstYmd = (d: any) => {
     const s = safe(d, "");
     if (!s) return "";
     if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
@@ -326,27 +275,42 @@ export function renderLaborInvoicePDF({
     }
   };
 
-  const dayOfMonth = (d: any) => {
-    const s = kstDateYmd(d);
-    const m = s.match(/-(\d{2})$/);
-    return m ? String(Number(m[1])) : "";
+  const dayOfMonthNum = (d: any) => {
+    const s = kstYmd(d);
+    if (!s) return 0;
+    const dd = Number(s.slice(8, 10));
+    return Number.isFinite(dd) ? dd : 0;
   };
 
-  const textWidth = (text: string, font: any, size: number) => {
+  const nnum = (v: any) => {
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const formatWonNum = (v: any) => {
+    const n = nnum(v);
     try {
-      return font.widthOfTextAtSize(text, size);
+      return Math.round(n).toLocaleString("ko-KR");
     } catch {
-      return text.length * size * 0.5;
+      return String(Math.round(n));
     }
   };
 
-  const ellipsisText = (text: string, font: any, size: number, maxW: number) => {
-    const t = cleanText(text);
-    if (!t) return "";
-    if (textWidth(t, font, size) <= maxW) return t;
+  const textWidth = (t: string, font: any, size: number) => {
+    try {
+      return font.widthOfTextAtSize(t, size);
+    } catch {
+      return t.length * size * 0.52;
+    }
+  };
+
+  const ellipsis = (t: string, font: any, size: number, maxW: number) => {
+    const s = safe(t, "");
+    if (!s) return "";
+    if (textWidth(s, font, size) <= maxW) return s;
     const E = "…";
     let out = "";
-    for (const ch of t) {
+    for (const ch of s) {
       const cand = out + ch;
       if (textWidth(cand + E, font, size) <= maxW) out = cand;
       else break;
@@ -354,365 +318,420 @@ export function renderLaborInvoicePDF({
     return out ? out + E : E;
   };
 
-  const wrapTextByWidth = (text: string, font: any, size: number, maxW: number) => {
-    const t = cleanText(text);
-    if (!t) return [""];
-    const words = t.split(/\s+/g);
-    const lines: string[] = [];
-    let cur = "";
-    for (const w of words) {
-      const next = cur ? `${cur} ${w}` : w;
-      if (textWidth(next, font, size) <= maxW) cur = next;
-      else {
-        if (cur) lines.push(cur);
-        cur = w;
-      }
-    }
-    if (cur) lines.push(cur);
-    return lines.length ? lines : [""];
-  };
-
-  // Use file-level COLOR_LINE/COLOR_TEXT if available in your file.
-  // If not, define locally:
-  const COLOR_TEXT_LOCAL = typeof COLOR_TEXT !== "undefined" ? COLOR_TEXT : undefined;
-  const COLOR_LINE_LOCAL = typeof COLOR_LINE !== "undefined" ? COLOR_LINE : undefined;
-
-  const drawLine = (x1: number, y1: number, x2: number, y2: number, w = 0.6) => {
+  const drawLine = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    th = TH_MINOR,
+    color = C_LINE
+  ) => {
     page.drawLine({
       start: { x: x1, y: y1 },
       end: { x: x2, y: y2 },
-      thickness: w,
-      color: COLOR_LINE_LOCAL,
+      thickness: th,
+      color,
     });
   };
 
-  // IMPORTANT: border only (no fill) to avoid black blocks
-  const drawRect = (x: number, y: number, w: number, h: number, bw = 1) => {
+  const drawRect = (
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    th = TH_MAJOR,
+    color = C_LINE
+  ) => {
     page.drawRectangle({
       x,
       y,
       width: w,
       height: h,
-      borderWidth: bw,
-      borderColor: COLOR_LINE_LOCAL,
+      borderWidth: th,
+      borderColor: color,
     });
   };
 
-  const drawTextCentered = (
-    text: string,
+  const fillRect = (x: number, y: number, w: number, h: number, color: any) => {
+    page.drawRectangle({ x, y, width: w, height: h, color });
+  };
+
+  const drawTextInCell = (
+    t: string,
     x: number,
     y: number,
     w: number,
     h: number,
-    opts?: { font?: any; size?: number; align?: "left" | "center" | "right"; padX?: number }
+    opts?: {
+      font?: any;
+      size?: number;
+      align?: "left" | "center" | "right";
+      padX?: number;
+      color?: any;
+      noEllipsis?: boolean;
+    }
   ) => {
     const font = opts?.font ?? fontReg;
-    const size = opts?.size ?? 10;
-    const padX = opts?.padX ?? 4;
-    const align = opts?.align ?? "left";
+    const size = opts?.size ?? 9.5;
+    const align = opts?.align ?? "center";
+    const padX = opts?.padX ?? 2;
+    const color = opts?.color ?? C_TEXT;
 
-    const t = cleanText(text);
-    const usableW = Math.max(0, w - padX * 2);
-    const s = ellipsisText(t, font, size, usableW);
+    const raw = safe(t, "");
+    const s = opts?.noEllipsis
+      ? raw
+      : ellipsis(raw, font, size, Math.max(0, w - padX * 2));
 
     const tw = textWidth(s, font, size);
+
     let tx = x + padX;
     if (align === "center") tx = x + (w - tw) / 2;
     if (align === "right") tx = x + w - padX - tw;
 
     const ty = y + (h - size) / 2 + 1;
-    page.drawText(s, { x: tx, y: ty, size, font, color: COLOR_TEXT_LOCAL });
+    page.drawText(s, { x: tx, y: ty, font, size, color });
   };
 
-  // -------------------------
-  // Meta / totals (Option B)
-  // -------------------------
+  // ✅ 멀티라인 헤더 중앙정렬(출력\n공수 쏠림 방지) [Source](https://www.genspark.ai/api/files/s/rrpEfMQh)
+  const drawMultilineCentered = (
+    text: string,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    font: any,
+    size: number,
+    color: any
+  ) => {
+    const lines = String(text).split("\n");
+    const lineGap = 1;
+    const totalTextH = lines.length * size + (lines.length - 1) * lineGap;
+
+    let cy = y + (h + totalTextH) / 2 - size;
+    for (const ln of lines) {
+      const t = ln.trim();
+      const tw = textWidth(t, font, size);
+      const tx = x + (w - tw) / 2;
+      page.drawText(t, { x: tx, y: cy, font, size, color });
+      cy -= size + lineGap;
+    }
+  };
+
+  // ✅ 1~31 헤더 숫자: ellipsis 금지
+  const drawDayHeaderNumber = (n: number, x: number, y: number, w: number, h: number) => {
+    const t = String(n);
+    const size = 6.2;
+    const tw = textWidth(t, fontBold, size);
+    const tx = x + (w - tw) / 2;
+    const ty = y + (h - size) / 2 + 1;
+    page.drawText(t, { x: tx, y: ty, font: fontBold, size, color: C_TEXT });
+  };
+
+  // ✅ day 값(공수) 전용: ellipsis 절대 금지 + 패딩 0에 가까운 중앙정렬
+  // -> "1.0"이 "…" / "..." 로 변하는 상황을 원천 차단 [Source](https://www.genspark.ai/api/files/s/rrpEfMQh)
+  const drawDayValue = (val: number, x: number, y: number, w: number, h: number) => {
+    if (!val) return;
+    const t = Number.isFinite(val) ? val.toFixed(1) : "";
+    if (!t) return;
+    const size = 6.2;
+    const tw = textWidth(t, fontReg, size);
+    const tx = x + (w - tw) / 2;
+    const ty = y + (h - size) / 2 + 1;
+    page.drawText(t, { x: tx, y: ty, font: fontReg, size, color: C_TEXT });
+  };
+
+  const isEllipsisLike = (v: any) => {
+    const s = typeof v === "string" ? v.trim() : "";
+    return s === "..." || s === "…";
+  };
+
+  const toNumberOrNull = (v: any): number | null => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === "number") return Number.isFinite(v) ? v : null;
+    if (typeof v === "string") {
+      const s = v.trim();
+      if (!s || isEllipsisLike(s)) return null;
+      if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    }
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  // =========================
+  // 2) Meta / period / totals
+  // =========================
   const meta = invoice?.meta ?? {};
-  const kind = safe(meta.kind, safe(invoice?.kind, ""));
+  const kind = safe(meta.kind, safe(invoice?.kind, "LABOR_INVOICE"));
 
   const periodStart = meta.periodStart ?? invoice?.periodStart ?? meta.period?.start;
   const periodEnd = meta.periodEnd ?? invoice?.periodEnd ?? meta.period?.end;
 
   const periodLabel = (() => {
-    const a = kstDateYmd(periodStart);
-    const b = kstDateYmd(periodEnd);
+    const a = kstYmd(periodStart);
+    const b = kstYmd(periodEnd);
     if (a && b) return `${a} ~ ${b}`;
     if (a) return a;
     if (b) return b;
     return "";
   })();
 
-  const siteName = cleanText(meta.siteName || site?.name || company?.name || "");
+  const issued = kstYmd(
+    invoice?.issuedAt ??
+    invoice?.issue_date ??
+    invoice?.date ??
+    invoice?.created_at ??
+    periodEnd ??
+    periodStart
+  );
+
+  const monthTitle = (() => {
+    const m = issued ? Number(issued.slice(5, 7)) : NaN;
+    return Number.isFinite(m) ? `${m} 월 노무비 청구서` : "노무비 청구서";
+  })();
+
+  const siteName = safe(meta.siteName || site?.name || "");
+  const recipientName = safe(company?.name || meta.recipientName || invoice?.contractor_name || "");
+  const recipientAddr = safe(company?.address || meta.recipientAddress || "");
+
   const dates: any[] = Array.isArray(meta.dates) ? meta.dates : [];
   const roleRows: any[] = Array.isArray(meta.roleRows) ? meta.roleRows : [];
 
-  // Option B: 표(노무비)는 "세전", 우측/하단은 "부가세/합계(세후)" 분리
   const totalIncl = nnum(invoice?.total ?? meta.grandTotal ?? meta.total ?? 0);
-  const tax = nnum(invoice?.tax ?? meta.tax ?? 0);
-  const subtotal = nnum(invoice?.subtotal ?? meta.subtotal ?? 0);
 
-  // fallback: if subtotal/tax missing but total exists, infer VAT 10%
-  const inferredSubtotal = subtotal > 0 ? subtotal : (tax > 0 ? totalIncl - tax : Math.round(totalIncl / 1.1));
-  const inferredTax = tax > 0 ? tax : Math.max(0, totalIncl - inferredSubtotal);
+  // =========================
+  // 3) Layout blocks (상단: 너가 좋다고 한 부분 유지)
+  // =========================
+  const titleH = 26;
+  const titleTop = H - M;
+  const topBlockH = 160;
+  const gapAfterTop = 10;
 
-  // -------------------------
-  // Title (no overlap)
-  // -------------------------
-  const monthTitle = (() => {
-    const s = kstDateYmd(invoice?.issuedAt ?? invoice?.issue_date ?? invoice?.date ?? invoice?.created_at ?? periodEnd ?? periodStart);
-    const m = s ? Number(s.slice(5, 7)) : undefined;
-    return m ? `${m} 월 노무비 청구서` : "노무비 청구서";
-  })();
-
-  // Title area at very top, separated from blocks
-  drawTextCentered(monthTitle, x0, H - MM - TITLE_H, W - MM * 2, TITLE_H, {
+  // Title
+  drawTextInCell(monthTitle, M, titleTop - titleH, CONTENT_W, titleH, {
     font: fontBold,
-    size: 16,
+    size: 14,
     align: "center",
+    noEllipsis: true,
   });
 
-  // -------------------------
-  // Top frames
-  // -------------------------
-  drawRect(x0, yTopBox, leftW, topH, 1);
-  drawRect(xRight, yTopBox, rightW, topH, 1);
+  // Top area box
+  const topBoxTopY = titleTop - titleH - 6;
+  const topBoxY = topBoxTopY - topBlockH;
 
-  // -------------------------
-  // Left box content
-  // -------------------------
-  const L_PAD = 8;
-  let ly = topY - 30;
+  drawRect(M, topBoxY, CONTENT_W, topBlockH, TH_OUTER);
 
-  drawTextCentered(`일자: ${kstDateYmd(invoice?.issuedAt ?? invoice?.issue_date ?? invoice?.date ?? periodEnd ?? "")}`, x0 + L_PAD, ly, leftW - L_PAD * 2, 18, {
-    font: fontReg,
-    size: 10,
-    align: "left",
-  });
-  ly -= 20;
+  // Split top into left/right
+  const leftW = Math.round(CONTENT_W * 0.58);
+  const rightW = CONTENT_W - leftW;
 
-  const recipient = cleanText(company?.name || meta.recipientName || "");
-  const recipientAddr = cleanText(company?.address || meta.recipientAddress || "");
+  const xL = M;
+  const xR = M + leftW;
 
-  drawTextCentered(`${recipient ? recipient + " 귀하" : "귀하"}`, x0 + L_PAD, ly, leftW - L_PAD * 2, 18, {
-    font: fontBold,
-    size: 12,
-    align: "left",
-  });
-  ly -= 18;
-  drawTextCentered(recipientAddr, x0 + L_PAD, ly, leftW - L_PAD * 2, 18, { font: fontReg, size: 10, align: "left" });
-  ly -= 22;
+  drawLine(xR, topBoxY, xR, topBoxY + topBlockH, TH_MAJOR);
 
-  drawTextCentered(`현장: ${siteName}`, x0 + L_PAD, ly, leftW - L_PAD * 2, 18, { font: fontReg, size: 10, align: "left" });
-  ly -= 18;
-  drawTextCentered(periodLabel ? `기간: ${periodLabel}` : "", x0 + L_PAD, ly, leftW - L_PAD * 2, 18, { font: fontReg, size: 10, align: "left" });
+  // Left top: date/company/site/period + phrase
+  // ✅ left-top block: label column width 고정
+  const LEFT_LABEL_W = 92;   // 핵심: 모든 줄 동일
+  const LEFT_ROW_H = 20;
+  const LEFT_PAD_X = 6;
 
-  // -------------------------
-  // Right box (7 blocks + Option B summary)
-  // -------------------------
-  const supplierBizNo = cleanText(officeProfile?.biz_no ?? "");
-  const supplierName = cleanText(officeProfile?.supplier_name ?? office?.name ?? "");
-  const supplierCeo = cleanText(officeProfile?.ceo_name ?? "");
-  const supplierAddr = cleanText(officeProfile?.address ?? "");
-  const bizType = cleanText(officeProfile?.biz_type ?? "");
-  const bizItem = cleanText(officeProfile?.biz_item ?? "");
-  const supplierPhone = cleanText(officeProfile?.phone ?? "");
+  let ly = topBoxY + topBlockH - 30;
 
-  const bankName = cleanText(officeProfile?.bank_name ?? "");
-  const bankAccount = cleanText(officeProfile?.bank_account ?? "");
-  const bankHolder = cleanText(officeProfile?.bank_holder ?? "");
-
-  const labelW = 86;
-  const valueW = rightW - labelW;
-  const halfValueW = valueW / 2;
-
-  // row heights (sum == topH)
-  const R_H1 = 22;
-  const R_HA = 40;
-  const R_HB = 40;
-  const RH = [R_H1, R_H1, R_HA, R_H1, R_H1, R_HB, R_H1]; // 7 blocks
-  const sumH = RH.reduce((a, b) => a + b, 0);
-  const scale = topH / sumH;
-  const RHs = RH.map((h) => Math.round(h * scale));
-  RHs[RHs.length - 1] += topH - RHs.reduce((a, b) => a + b, 0);
-
-  const drawRowBorder = (y: number, h: number) => {
-    drawLine(xRight, y, xRight + rightW, y, 0.6);
-    drawLine(xRight, y + h, xRight + rightW, y + h, 0.6);
-    drawLine(xRight, y, xRight, y + h, 0.6);
-    drawLine(xRight + rightW, y, xRight + rightW, y + h, 0.6);
-    drawLine(xRight + labelW, y, xRight + labelW, y + h, 0.6);
-  };
-
-  const drawLabelValue1 = (y: number, h: number, label: string, value: string) => {
-    drawRowBorder(y, h);
-    drawTextCentered(label, xRight, y, labelW, h, { font: fontBold, size: 10, align: "center" });
-    drawTextCentered(value, xRight + labelW, y, valueW, h, { font: fontReg, size: 10, align: "left", padX: 6 });
-  };
-
-  const drawLabelValueWrap2 = (y: number, h: number, label: string, value: string) => {
-    drawRowBorder(y, h);
-    drawTextCentered(label, xRight, y, labelW, h, { font: fontBold, size: 10, align: "center" });
-    const lines = wrapTextByWidth(value, fontReg, 10, valueW - 12).slice(0, 2);
-    const lineH = h / 2;
-    drawTextCentered(lines[0] ?? "", xRight + labelW, y + lineH, valueW, lineH, { font: fontReg, size: 10, align: "left", padX: 6 });
-    drawTextCentered(lines[1] ?? "", xRight + labelW, y, valueW, lineH, { font: fontReg, size: 10, align: "left", padX: 6 });
-  };
-
-  const drawLabelTwoCol = (y: number, h: number, label: string, leftLabel: string, leftVal: string, rightLabel: string, rightVal: string) => {
-    drawRowBorder(y, h);
-
-    // split between two value columns
-    drawLine(xRight + labelW + halfValueW, y, xRight + labelW + halfValueW, y + h, 0.6);
-
-    drawTextCentered(label, xRight, y, labelW, h, { font: fontBold, size: 10, align: "center" });
-
-    const subLabelW = 40;
-
-    // left sub split
-    drawLine(xRight + labelW + subLabelW, y, xRight + labelW + subLabelW, y + h, 0.6);
-    drawTextCentered(leftLabel, xRight + labelW, y, subLabelW, h, { font: fontReg, size: 9.5, align: "center" });
-    drawTextCentered(leftVal, xRight + labelW + subLabelW, y, halfValueW - subLabelW, h, { font: fontReg, size: 10, align: "left", padX: 6 });
-
-    // right sub split
-    const rx = xRight + labelW + halfValueW;
-    drawLine(rx + subLabelW, y, rx + subLabelW, y + h, 0.6);
-    drawTextCentered(rightLabel, rx, y, subLabelW, h, { font: fontReg, size: 9.5, align: "center" });
-    drawTextCentered(rightVal, rx + subLabelW, y, halfValueW - subLabelW, h, { font: fontReg, size: 10, align: "left", padX: 6 });
-  };
-
-  // 합계금액(세후) 대신 Option B: 공급가/부가세/합계 를 합계금액 셀 안에 2줄로
-  // 단, 사용자가 "오른쪽 딱 정해줄게 ... 합계금액" 순서를 원했으니 "합계금액" 라벨은 유지하고, 값은 2줄 구성
-  const drawSumRowOptionB = (y: number, h: number) => {
-    drawRowBorder(y, h);
-    drawTextCentered("합계금액", xRight, y, labelW, h, { font: fontBold, size: 10, align: "center" });
-
-    const lineH = h / 2;
-    const fs1 = 9.5;
-    const fs2 = 11.5;
-
-    const supply = `공급가: ${formatWon(inferredSubtotal)}원`;
-    const vat = `부가세: ${formatWon(inferredTax)}원`;
-    const totalLine = `합계: ${formatWon(totalIncl)}원`;
-
-    // 위칸: 공급가/부가세 (좌측)
-    drawTextCentered(`${supply}  ${vat}`, xRight + labelW, y + lineH, valueW, lineH, {
+  const drawLeftKV = (label: string, value: string, opts?: { valueFont?: any; valueSize?: number }) => {
+    drawTextInCell(label, xL, ly, LEFT_LABEL_W, LEFT_ROW_H, {
       font: fontReg,
-      size: fs1,
+      size: 9.5,
       align: "left",
-      padX: 6,
+      padX: LEFT_PAD_X,
+      color: C_MUTED,
+      noEllipsis: true,
     });
 
-    // 아래칸: 합계(우측 정렬, 굵게)
-    drawTextCentered(totalLine, xRight + labelW, y, valueW, lineH, {
-      font: fontBold,
-      size: fs2,
-      align: "right",
-      padX: 6,
+    drawTextInCell(value, xL + LEFT_LABEL_W, ly, leftW - LEFT_LABEL_W, LEFT_ROW_H, {
+      font: opts?.valueFont ?? fontReg,
+      size: opts?.valueSize ?? 9.5,
+      align: "left",
+      padX: LEFT_PAD_X,
     });
+
+    ly -= LEFT_ROW_H;
   };
 
-  // stack from top to bottom
-  let ry = yTopBox + topH;
-  const rowY = (h: number) => {
-    ry -= h;
-    return ry;
+  drawLeftKV("일자", issued);
+  drawLeftKV("회사명", recipientName, { valueFont: fontBold, valueSize: 11 });
+  drawLeftKV("소재지", recipientAddr);
+  drawLeftKV("현장", siteName);
+  drawLeftKV("기간", periodLabel);
+
+
+  drawTextInCell(`아래와 같이 계산 청구합니다`, xL, topBoxY + 8, leftW, 18, {
+    font: fontReg,
+    size: 9.5,
+    align: "center",
+    color: C_MUTED,
+    noEllipsis: true,
+  });
+
+  // Right top: supplier info (2칸/1칸 혼합) + 합계금액(겹침 방지 분리)
+  const supplierBizNo = safe(officeProfile?.biz_no ?? "");
+  const supplierName = safe(officeProfile?.supplier_name ?? office?.name ?? "");
+  const supplierCeo = safe(officeProfile?.ceo_name ?? "");
+  const supplierAddr = safe(officeProfile?.address ?? "");
+  const supplierPhone = safe(officeProfile?.phone ?? "");
+  const bizType = safe(officeProfile?.biz_type ?? "");
+  const bizItem = safe(officeProfile?.biz_item ?? "");
+  const bankName = safe(officeProfile?.bank_name ?? "");
+  const bankAccount = safe(officeProfile?.bank_account ?? "");
+  const bankHolder = safe(officeProfile?.bank_holder ?? "");
+
+  const rX = xR;
+  const rY = topBoxY;
+  const rH = topBlockH;
+
+  const sumRowH = 24;         // 합계금액 고정
+  const infoH = rH - sumRowH; // 정보영역
+  drawRect(rX, rY, rightW, rH, TH_MAJOR, C_LINE);
+  drawLine(rX, rY + sumRowH, rX + rightW, rY + sumRowH, TH_MAJOR);
+
+  const labelW = 44;
+
+  const drawInfoPair = (x: number, y: number, w: number, h: number, label: string, value: string) => {
+    drawLine(x + labelW, y, x + labelW, y + h, TH_MINOR, C_LINE_SOFT);
+    drawTextInCell(label, x, y, labelW, h, { font: fontReg, size: 8.8, align: "center", color: C_MUTED, noEllipsis: true });
+    drawTextInCell(value, x + labelW, y, w - labelW, h, { font: fontReg, size: 8.8, align: "left", padX: 5 });
   };
 
-  // 1) 등록번호
-  drawLabelValue1(rowY(RHs[0]), RHs[0], "등록번호", supplierBizNo);
+  type InfoRow =
+    | { type: "single"; label: string; value: string }
+    | { type: "double"; leftLabel: string; leftValue: string; rightLabel: string; rightValue: string };
 
-  // 2) 상호/대표자
-  drawLabelTwoCol(rowY(RHs[1]), RHs[1], "상호/대표자", "상호", supplierName, "대표", supplierCeo);
+  const infoRows: InfoRow[] = [
+    { type: "double", leftLabel: "등록번호", leftValue: supplierBizNo, rightLabel: "연락처", rightValue: supplierPhone },
+    { type: "double", leftLabel: "상  호", leftValue: supplierName, rightLabel: "대  표", rightValue: supplierCeo },
+    { type: "single", label: "주  소", value: supplierAddr },
+    { type: "double", leftLabel: "업  태", leftValue: bizType, rightLabel: "종  목", rightValue: bizItem },
+  ];
 
-  // 3) 주소
-  drawLabelValueWrap2(rowY(RHs[2]), RHs[2], "주  소", supplierAddr);
-
-  // 4) 업태/종목
-  drawLabelTwoCol(rowY(RHs[3]), RHs[3], "업태/종목", "업태", bizType, "종목", bizItem);
-
-  // 5) 연락처
-  drawLabelValue1(rowY(RHs[4]), RHs[4], "연락처", supplierPhone);
-
-  // 6) 계좌/예금주
-  {
-    const line1 = [bankName, bankAccount].filter(Boolean).join(" ");
-    const line2 = bankHolder ? `예금주: ${bankHolder}` : "";
-    drawLabelValueWrap2(rowY(RHs[5]), RHs[5], "계좌/예금주", [line1, line2].filter(Boolean).join(" "));
+  if (bankName || bankAccount || bankHolder) {
+    const bankLine = [bankName, bankAccount].filter(Boolean).join(" ");
+    const holderLine = bankHolder ? `예금주:${bankHolder}` : "";
+    infoRows.push({ type: "single", label: "계  좌", value: [bankLine, holderLine].filter(Boolean).join(" / ") });
   }
 
-  // 7) 합계금액 (Option B)
-  drawSumRowOptionB(rowY(RHs[6]), RHs[6]);
+  const infoRowH = Math.floor(infoH / infoRows.length);
+  const infoAreaTop = rY + rH;
+  for (let i = 0; i < infoRows.length; i++) {
+    const yRow = infoAreaTop - (i + 1) * infoRowH;
+    drawLine(rX, yRow, rX + rightW, yRow, TH_MINOR, C_LINE_SOFT);
 
-  // -------------------------
-  // MAIN GRID
-  // -------------------------
-  drawRect(x0, gridY, W - MM * 2, GRID_H, 1);
+    const row = infoRows[i];
+    if (row.type === "single") {
+      drawInfoPair(rX, yRow, rightW, infoRowH, row.label, row.value);
+    } else {
+      const halfW = rightW / 2;
+      drawLine(rX + halfW, yRow, rX + halfW, yRow + infoRowH, TH_MINOR, C_LINE_SOFT);
+      drawInfoPair(rX, yRow, halfW, infoRowH, row.leftLabel, row.leftValue);
+      drawInfoPair(rX + halfW, yRow, halfW, infoRowH, row.rightLabel, row.rightValue);
+    }
+  }
 
-  const gridX = x0;
-  const gridW = W - MM * 2;
+  // 합계금액(하단 고정 영역)
+  const sumLabelW = 60;
+  drawLine(rX + sumLabelW, rY, rX + sumLabelW, rY + sumRowH, TH_MAJOR, C_LINE_SOFT);
+  drawTextInCell("합계금액", rX, rY, sumLabelW, sumRowH, { font: fontReg, size: 9, align: "center", color: C_MUTED, noEllipsis: true });
+  drawTextInCell(`${formatWonNum(totalIncl)}원`, rX + sumLabelW, rY, rightW - sumLabelW, sumRowH, { font: fontBold, size: 10.5, align: "left", padX: 6, noEllipsis: true });
 
-  const header1H = 26;
-  const header2H = 24;
-  const rowH = 22;
-  const footerH = 22;
+  // =========================
+  // 4) Main Grid (표) — 아래 문제(공수 … / 헤더 쏠림 / 칸구분선) 해결 버전
+  // =========================
+  const gridTop = topBoxY - gapAfterTop;
+  const bottomReserve = 18 + 38;
+  const gridBottom = M + bottomReserve;
 
-  const colSiteW = 70;
-  const colRoleW = 70;
-  const colManDaysW = 44;
-  const colUnitW = 62;
-  const colSumW = 80;
+  const gridX = M;
+  const gridY = gridBottom;
+  const gridW = CONTENT_W;
+  const gridH = gridTop - gridBottom;
 
-  const dayCount = Math.max(0, dates.length);
-  const daysAreaW = gridW - (colSiteW + colRoleW + colManDaysW + colUnitW + colSumW);
-  const dayW = dayCount > 0 ? daysAreaW / dayCount : daysAreaW;
+  drawRect(gridX, gridY, gridW, gridH, TH_OUTER);
 
-  const xSite = gridX + colSiteW;
-  const xRole = xSite + colRoleW;
-  const xDaysStart = xRole;
+  // column widths (dayW 확보 위주)
+  const colSiteW = 42;
+  const colRoleW = 42;
+  const colOutW = 40;
+  const colUnitW = 55;
+  const colSumW = 65;
+  const daysAreaW = gridW - (colSiteW + colRoleW + colOutW + colUnitW + colSumW);
+
+  const DAY_COLS = 31;
+  const dayW = daysAreaW / DAY_COLS;
+
+  const xSiteEnd = gridX + colSiteW;
+  const xRoleEnd = xSiteEnd + colRoleW;
+  const xDaysStart = xRoleEnd;
   const xDaysEnd = xDaysStart + daysAreaW;
-  const xManDays = xDaysEnd;
-  const xUnit = xDaysEnd + colManDaysW;
-  const xSum = xDaysEnd + colManDaysW + colUnitW;
+  const xOut = xDaysEnd;
+  const xUnit = xOut + colOutW;
+  const xSum = xUnit + colUnitW;
 
-  // fixed vertical lines
-  drawLine(xSite, gridY, xSite, gridY + GRID_H, 0.6);
-  drawLine(xRole, gridY, xRole, gridY + GRID_H, 0.6);
-  drawLine(xDaysEnd, gridY, xDaysEnd, gridY + GRID_H, 0.6);
-  drawLine(xUnit, gridY, xUnit, gridY + GRID_H, 0.6);
-  drawLine(xSum, gridY, xSum, gridY + GRID_H, 0.6);
+  // header heights
+  const h1 = 22;
+  const h2 = 20;
+  const rowH = 18;
+  const footerH = 18;
 
-  let gy = gridY + GRID_H;
+  // visibility for day grid lines
+  const C_DAY_LINE = rgb(0.84, 0.84, 0.84);
+  const TH_DAY = 0.55;
 
-  // Header row 1
-  gy -= header1H;
-  drawLine(gridX, gy, gridX + gridW, gy, 0.6);
+  // major verticals
+  drawLine(xSiteEnd, gridY, xSiteEnd, gridY + gridH, TH_MAJOR);
+  drawLine(xRoleEnd, gridY, xRoleEnd, gridY + gridH, TH_MAJOR);
+  drawLine(xDaysEnd, gridY, xDaysEnd, gridY + gridH, TH_MAJOR);
+  drawLine(xOut, gridY, xOut, gridY + gridH, TH_MAJOR);
+  drawLine(xUnit, gridY, xUnit, gridY + gridH, TH_MAJOR);
+  drawLine(xSum, gridY, xSum, gridY + gridH, TH_MAJOR);
 
-  drawTextCentered("현장", gridX, gy, colSiteW, header1H, { font: fontBold, size: 10, align: "center" });
-  drawTextCentered("구분", gridX + colSiteW, gy, colRoleW, header1H, { font: fontBold, size: 10, align: "center" });
+  let y = gridY + gridH;
 
-  drawTextCentered("출력상황", xDaysStart, gy, daysAreaW, header1H, { font: fontBold, size: 11, align: "center" });
-  drawTextCentered(periodLabel, xDaysStart, gy, daysAreaW, header1H, { font: fontReg, size: 9, align: "right", padX: 6 });
+  // header row 1 (merged 출력상황)
+  y -= h1;
+  drawLine(gridX, y, gridX + gridW, y, TH_MAJOR);
 
-  // 출력공수 2줄
-  drawTextCentered("출력", xManDays, gy + header1H / 2, colManDaysW, header1H / 2, { font: fontBold, size: 9.5, align: "center" });
-  drawTextCentered("공수", xManDays, gy, colManDaysW, header1H / 2, { font: fontBold, size: 9.5, align: "center" });
+  drawTextInCell("현장", gridX, y, colSiteW, h1, { font: fontBold, size: 9.5, align: "center", noEllipsis: true });
+  drawTextInCell("구분", gridX + colSiteW, y, colRoleW, h1, { font: fontBold, size: 9.5, align: "center", noEllipsis: true });
 
-  drawTextCentered("단가", xUnit, gy, colUnitW, header1H, { font: fontBold, size: 10, align: "center" });
-  drawTextCentered("노무비", xSum, gy + header1H / 2, colSumW, header1H / 2, { font: fontBold, size: 9.5, align: "center" });
-  drawTextCentered("총액", xSum, gy, colSumW, header1H / 2, { font: fontBold, size: 9.5, align: "center" });
+  drawTextInCell("출력상황", xDaysStart, y, daysAreaW, h1, { font: fontBold, size: 9.5, align: "center", noEllipsis: true });
+  drawTextInCell(periodLabel, xDaysStart, y, daysAreaW, h1, { font: fontReg, size: 8, align: "right", padX: 4, color: C_MUTED });
 
-  // Header row 2 (days)
-  gy -= header2H;
-  drawLine(gridX, gy, gridX + gridW, gy, 0.6);
+  // ✅ 멀티라인 중앙정렬로 쏠림 제거 [Source](https://www.genspark.ai/api/files/s/rrpEfMQh)
+  drawMultilineCentered("출력\n공수", xOut, y, colOutW, h1, fontBold, 8.5, C_TEXT);
+  drawTextInCell("단가", xUnit, y, colUnitW, h1, { font: fontBold, size: 9.5, align: "center", noEllipsis: true });
+  drawMultilineCentered("노무비\n총액", xSum, y, colSumW, h1, fontBold, 8.5, C_TEXT);
 
-  for (let i = 0; i < dayCount; i++) {
+  // header row 2 (1~31)
+  y -= h2;
+  drawLine(gridX, y, gridX + gridW, y, TH_MAJOR);
+
+  // ✅ 핵심: day 세로선은 병합헤더(h1)에 올라오면 안 됨
+  // -> 숫자 헤더(h2) 아래 영역부터만 세로선을 내려준다. [Source](https://www.genspark.ai/api/files/s/rrpEfMQh)
+  const yDayGridTop = y + h2;
+
+  // day vertical lines (칸 구분 확실히) - 마지막 경계 포함
+  for (let i = 0; i <= DAY_COLS; i++) {
     const dx = xDaysStart + dayW * i;
-    drawLine(dx, gy, dx, gridY + GRID_H, 0.3);
-    drawTextCentered(dayOfMonth(dates[i]), dx, gy, dayW, header2H, { font: fontBold, size: 9.5, align: "center" });
+    drawLine(dx, gridY, dx, yDayGridTop, TH_DAY, C_DAY_LINE);
   }
-  drawLine(xDaysStart + dayW * dayCount, gy, xDaysStart + dayW * dayCount, gridY + GRID_H, 0.3);
 
-  // ---- Extract day values with multi-fallback & "numbers only" policy ----
+  // day numbers
+  for (let i = 0; i < DAY_COLS; i++) {
+    const dx = xDaysStart + dayW * i;
+    drawDayHeaderNumber(i + 1, dx, y, dayW, h2);
+  }
+
+  // ---- day extraction helpers ----
   const extractDayVals = (row: any): any[] => {
     if (Array.isArray(row?.days)) return row.days;
     if (Array.isArray(row?.values)) return row.values;
@@ -727,7 +746,7 @@ export function renderLaborInvoicePDF({
 
     if (map && typeof map === "object" && !Array.isArray(map)) {
       return dates.map((d: any) => {
-        const keyYmd = (typeof d === "string" ? d : kstDateYmd(d)).slice(0, 10);
+        const keyYmd = (typeof d === "string" ? d : kstYmd(d)).slice(0, 10);
         const keyDay = String(Number(keyYmd.slice(8, 10)));
         return (map as any)[keyYmd] ?? (map as any)[keyDay] ?? 0;
       });
@@ -735,34 +754,68 @@ export function renderLaborInvoicePDF({
 
     const items = row?.items || row?.entries || row?.details;
     if (Array.isArray(items)) {
-      const m = new Map<string, number>();
+      const m = new Map<number, number>();
       for (const it of items) {
-        const keyYmd = cleanText(it?.date ?? it?.ymd ?? it?.day ?? "").slice(0, 10);
+        const ymdKey = safe(it?.date ?? it?.ymd ?? it?.day ?? "", "").slice(0, 10);
+        const day = Number(ymdKey.slice(8, 10));
         const units = nnum(it?.units ?? it?.value ?? it?.manDays ?? it?.count ?? 0);
-        if (keyYmd) m.set(keyYmd, units);
+        if (day >= 1 && day <= 31) m.set(day, (m.get(day) ?? 0) + units);
       }
-      return dates.map((d: any) => m.get((typeof d === "string" ? d : kstDateYmd(d)).slice(0, 10)) ?? 0);
+      return dates.map((d: any) => m.get(dayOfMonthNum(d)) ?? 0);
     }
 
     return [];
   };
 
-  // Body rows
-  const maxBodyRows = Math.floor((GRID_H - header1H - header2H - footerH) / rowH);
+  const normalizeDayVals31 = (row: any) => {
+    const out = Array.from({ length: 31 }, () => 0);
+    const raw = extractDayVals(row) ?? [];
+
+    if (dates.length && raw.length) {
+      const n = Math.min(dates.length, raw.length);
+      for (let i = 0; i < n; i++) {
+        const day = dayOfMonthNum(dates[i]);
+        const v = toNumberOrNull(raw[i]) ?? 0;
+        if (day >= 1 && day <= 31) out[day - 1] += v;
+      }
+      return out;
+    }
+
+    if (raw.length === 31) {
+      for (let i = 0; i < 31; i++) out[i] = toNumberOrNull(raw[i]) ?? 0;
+      return out;
+    }
+
+    // fallback: try parse sequential days if raw length matches day count (rare)
+    if (raw.length > 0 && raw.length <= 31) {
+      for (let i = 0; i < raw.length; i++) out[i] = toNumberOrNull(raw[i]) ?? 0;
+    }
+    return out;
+  };
+
+  const fmtUnits1 = (n: number) => (Number.isFinite(n) ? n.toFixed(1) : "");
+
+  // =========================
+  // 5) Body rows + Footer
+  // =========================
+  const bodyTopY = y;
+  const availableBodyH = (bodyTopY - gridY) - footerH;
+  const maxBodyRows = Math.max(1, Math.floor(availableBodyH / rowH));
   const rows = roleRows.slice(0, maxBodyRows);
 
   let sumManDays = 0;
   let sumAmountExVat = 0;
 
-  for (let r = 0; r < rows.length; r++) {
-    const row = rows[r] ?? {};
-    gy -= rowH;
-    drawLine(gridX, gy, gridX + gridW, gy, 0.3);
+  // 바디 행: 가로선으로 구분
+  for (let r = 0; r < maxBodyRows; r++) {
+    y -= rowH;
+    drawLine(gridX, y, gridX + gridW, y, TH_MINOR, C_LINE_SOFT);
 
-    // IMPORTANT: never allow "..." for text columns
-    const roleName = cleanText(row.roleName ?? row.role ?? row.occupation ?? "");
+    const row = rows[r];
+    if (!row) continue;
 
-    // unitPrice: wide field candidate set
+    const roleName = safe(row.roleName ?? row.role ?? row.occupation ?? "");
+
     const unitPriceRaw = nnum(
       row.unitPrice ??
       row.unit_price ??
@@ -776,24 +829,11 @@ export function renderLaborInvoicePDF({
       0
     );
 
-    const dayVals = extractDayVals(row);
+    const vals31 = normalizeDayVals31(row);
 
-    // 일별 출력상황: "숫자만" 찍고, 나머지는 빈칸
     let manDays = 0;
+    for (let i = 0; i < 31; i++) manDays += (typeof vals31[i] === "number" ? vals31[i] : 0);
 
-    for (let i = 0; i < dayCount; i++) {
-      const raw = dayVals[i];
-      const numOrNull = toNumberOrNull(raw);
-      const num = numOrNull ?? 0;
-      manDays += num;
-
-      const dx = xDaysStart + dayW * i;
-      const s = numOrNull && num !== 0 ? fmtUnits1(num) : "";
-      drawTextCentered(s, dx, gy, dayW, rowH, { font: fontReg, size: 9, align: "center" });
-    }
-
-    // amountExVat: prefer meta amount/gross, else compute
-    // NOTE: 여기서는 "세전(노무비)"로 표시 (옵션 B)
     const amountExVat = nnum(
       row.amountExVat ??
       row.amount_ex_vat ??
@@ -803,89 +843,121 @@ export function renderLaborInvoicePDF({
       row.sum ??
       row.total ??
       row.gross ??
-      (unitPriceRaw * manDays)
+      unitPriceRaw * manDays
     );
 
-    // unitPrice fallback: if unitPrice missing but amount & manDays exist
-    const unitPrice = unitPriceRaw > 0 ? unitPriceRaw : (manDays > 0 ? Math.round(amountExVat / manDays) : 0);
+    const unitPrice = unitPriceRaw > 0 ? unitPriceRaw : manDays > 0 ? Math.round(amountExVat / manDays) : 0;
 
     sumManDays += manDays;
     sumAmountExVat += amountExVat;
 
     // left columns
-    drawTextCentered(siteName, gridX, gy, colSiteW, rowH, { font: fontReg, size: 9.5, align: "center" });
-    drawTextCentered(roleName, gridX + colSiteW, gy, colRoleW, rowH, { font: fontReg, size: 9.5, align: "center" });
+    drawTextInCell(siteName, gridX, y, colSiteW, rowH, { font: fontReg, size: 7.0, align: "center" });
+    drawTextInCell(roleName, gridX + colSiteW, y, colRoleW, rowH, { font: fontReg, size: 7.0, align: "center" });
 
-    // right fixed columns
-    drawTextCentered(manDays ? fmtUnits1(manDays) : "", xManDays, gy, colManDaysW, rowH, { font: fontReg, size: 9.5, align: "center" });
-    drawTextCentered(unitPrice ? formatWon(unitPrice) : "", xUnit, gy, colUnitW, rowH, { font: fontReg, size: 9.5, align: "right", padX: 6 });
-    drawTextCentered(amountExVat ? formatWon(amountExVat) : "", xSum, gy, colSumW, rowH, { font: fontReg, size: 9.5, align: "right", padX: 6 });
-  }
-
-  // Footer sum row
-  gy -= footerH;
-  drawLine(gridX, gy, gridX + gridW, gy, 0.6);
-
-  drawTextCentered("합계", gridX, gy, colSiteW + colRoleW, footerH, { font: fontBold, size: 10, align: "center" });
-
-  // day sums (numbers only)
-  const daySums: number[] = Array.from({ length: dayCount }, () => 0);
-  for (const row of roleRows) {
-    const vals = extractDayVals(row);
-    for (let i = 0; i < dayCount; i++) {
-      const num = toNumberOrNull(vals[i]) ?? 0;
-      daySums[i] += num;
+    // ✅ day columns: 숫자(공수) 전용 렌더러로만 출력 -> "..."로 바뀌는 현상 원천 차단 [Source](https://www.genspark.ai/api/files/s/rrpEfMQh)
+    for (let i = 0; i < 31; i++) {
+      const dx = xDaysStart + dayW * i;
+      const v = typeof vals31[i] === "number" && Number.isFinite(vals31[i]) ? vals31[i] : 0;
+      drawDayValue(v, dx, y, dayW, rowH);
     }
-  }
-  for (let i = 0; i < dayCount; i++) {
-    const dx = xDaysStart + dayW * i;
-    const v = daySums[i];
-    drawTextCentered(v ? fmtUnits1(v) : "", dx, gy, dayW, footerH, { font: fontBold, size: 9, align: "center" });
+
+    // right columns
+    drawTextInCell(manDays ? fmtUnits1(manDays) : "", xOut, y, colOutW, rowH, {
+      font: fontReg,
+      size: 7.0,
+      align: "center",
+      noEllipsis: true,
+    });
+    drawTextInCell(unitPrice ? formatWonNum(unitPrice) : "", xUnit, y, colUnitW, rowH, {
+      font: fontReg,
+      size: 7.0,
+      align: "right",
+      padX: 4,
+    });
+    drawTextInCell(amountExVat ? formatWonNum(amountExVat) : "", xSum, y, colSumW, rowH, {
+      font: fontReg,
+      size: 7.0,
+      align: "right",
+      padX: 4,
+    });
   }
 
-  drawTextCentered(sumManDays ? fmtUnits1(sumManDays) : "", xManDays, gy, colManDaysW, footerH, { font: fontBold, size: 9.5, align: "center" });
-  drawTextCentered("", xUnit, gy, colUnitW, footerH, { font: fontReg, size: 9.5, align: "center" });
+  // Footer(합계) 배경 음영
+  y -= footerH;
+  fillRect(gridX, y, gridW, footerH, C_SUM_FILL);
+  drawLine(gridX, y, gridX + gridW, y, TH_MAJOR);
 
-  // 표의 "노무비 총액"은 세전 합계로 유지 (옵션 B)
-  drawTextCentered(sumAmountExVat ? formatWon(sumAmountExVat) : "", xSum, gy, colSumW, footerH, {
+  drawTextInCell("합계", gridX, y, colSiteW + colRoleW, footerH, {
     font: fontBold,
-    size: 10,
+    size: 8.5,
+    align: "center",
+    noEllipsis: true,
+  });
+
+  const daySums = Array.from({ length: 31 }, () => 0);
+  for (const row of roleRows) {
+    const v31 = normalizeDayVals31(row);
+    for (let i = 0; i < 31; i++) daySums[i] += typeof v31[i] === "number" ? v31[i] : 0;
+  }
+
+  // day sums도 전용 렌더러 사용
+  for (let i = 0; i < 31; i++) {
+    const dx = xDaysStart + dayW * i;
+    drawDayValue(daySums[i], dx, y, dayW, footerH);
+  }
+
+  drawTextInCell(sumManDays ? fmtUnits1(sumManDays) : "", xOut, y, colOutW, footerH, {
+    font: fontBold,
+    size: 7.0,
+    align: "center",
+    noEllipsis: true,
+  });
+  drawTextInCell("", xUnit, y, colUnitW, footerH, { font: fontReg, size: 7.0, align: "center" });
+  drawTextInCell(sumAmountExVat ? formatWonNum(sumAmountExVat) : "", xSum, y, colSumW, footerH, {
+    font: fontBold,
+    size: 8.5,
+    align: "right",
+    padX: 4,
+  });
+
+  // Outer bottom line
+  drawLine(gridX, gridY, gridX + gridW, gridY, TH_OUTER);
+
+  // =========================
+  // 6) Bottom total box (우하단)
+  // =========================
+  const boxW = 190;
+  const boxH = 34;
+  const bx = M + CONTENT_W - boxW;
+  const by = M + 12;
+
+  drawRect(bx, by, boxW, boxH, TH_MAJOR, C_LINE);
+  drawTextInCell("총합계", bx, by, 55, boxH, { font: fontBold, size: 9, align: "center", noEllipsis: true });
+  drawTextInCell(`₩${formatWonNum(totalIncl)}`, bx + 55, by, boxW - 55, boxH, {
+    font: fontBold,
+    size: 10.5,
     align: "right",
     padX: 6,
+    noEllipsis: true,
   });
 
-  // Bottom-right grand total box (세후 total + 부가세 표시)
-  const grandBoxW = 220;
-  const grandBoxH = 40;
-  const gx = gridX + gridW - grandBoxW;
-  const gy2 = gridY - 44;
-
-  drawRect(gx, gy2, grandBoxW, grandBoxH, 1);
-
-  // 2-line in box: 공급가/부가세 on top, 총계 on bottom-right
-  const lineH = grandBoxH / 2;
-  drawTextCentered(`공급가 ${formatWon(inferredSubtotal)}원   부가세 ${formatWon(inferredTax)}원`, gx, gy2 + lineH, grandBoxW, lineH, {
-    font: fontReg,
-    size: 9.5,
-    align: "left",
-    padX: 8,
-  });
-  drawTextCentered(`총계  ${formatWon(totalIncl)}원`, gx, gy2, grandBoxW, lineH, {
-    font: fontBold,
-    size: 12,
-    align: "right",
-    padX: 8,
-  });
-
-  // kind guard
+  // (선택) kind debug
   if (kind && kind !== "LABOR_INVOICE") {
-    drawTextCentered(`(주의) kind=${kind}`, x0, MM - 6, W - MM * 2, 14, { font: fontReg, size: 8, align: "left" });
+    drawTextInCell(`(주의) kind=${kind}`, M, M - 2, CONTENT_W, 12, {
+      font: fontReg,
+      size: 7,
+      align: "left",
+      color: C_MUTED,
+      noEllipsis: true,
+    });
   }
-
-  
 
   return page;
 }
+
+
+
 
 async function renderGenericInvoicePDF(args: {
   pdfDoc: PDFDocument;
