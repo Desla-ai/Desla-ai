@@ -159,6 +159,13 @@ function buildInitialState(): AppState {
   }
 }
 
+type CreateWorkerInput = Omit<Worker, "id"> & {
+  idFront6: string
+  idBack1: string
+  idCopyFrontPath: string
+  idCopyBackPath: string
+}
+
 // Context type
 interface AppStoreContextType {
   state: AppState
@@ -166,7 +173,7 @@ interface AppStoreContextType {
   updateSite: (site: Site) => Promise<void>
   deleteSite: (siteId: string) => Promise<void>
 
-  addWorker: (worker: Omit<Worker, "id">) => Promise<void>
+  addWorker: (worker: CreateWorkerInput) => Promise<void>
   updateWorker: (worker: Worker) => Promise<void>
   deleteWorker: (workerId: string) => Promise<void>
   // Settlement
@@ -273,7 +280,15 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     }))
   }, [])
 
-  type WorkerPatch = Partial<Omit<Worker, "id">>
+  type WorkerPatch = Partial<Omit<Worker, "id">> & {
+    idFront6?: string
+    idBack1?: string
+    idCopyFrontPath?: string
+    idCopyBackPath?: string
+  }
+
+
+
 
   const updateWorkerPatch = useCallback(async (id: string, patch: WorkerPatch) => {
     const res = await fetch(`/api/workers/${encodeURIComponent(id)}`, {
@@ -352,7 +367,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Workers
-  const addWorker = useCallback(async (workerData: Omit<Worker, "id">) => {
+  const addWorker = useCallback(async (workerData: CreateWorkerInput) => {
     const res = await fetch("/api/workers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Separator } from "@/components/ui/separator"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { CompanyPickerDialog } from "@/components/companies/company-picker-dialog"
 import {
   Table,
   TableBody,
@@ -136,6 +137,13 @@ export default function BillingPage() {
 
 
   // New invoice form
+
+  const [companyPickerOpen, setCompanyPickerOpen] = useState(false)
+  const [newInvoiceCompanyId, setNewInvoiceCompanyId] = useState("")
+  const [newInvoiceCompanyName, setNewInvoiceCompanyName] = useState("")
+  const [newInvoiceCompanyBizNo, setNewInvoiceCompanyBizNo] = useState("")
+
+
   const [newInvoiceSiteId, setNewInvoiceSiteId] = useState("")
   const [newInvoiceContractor, setNewInvoiceContractor] = useState("")
   const [newInvoiceNotes, setNewInvoiceNotes] = useState("")
@@ -268,7 +276,8 @@ export default function BillingPage() {
 
   const handleCreateInvoice = async () => {
     if (!newInvoiceSiteId) return toast.error("현장을 선택해주세요")
-    if (!newInvoiceContractor.trim()) return toast.error("건설사명을 입력해주세요")
+    if (!newInvoiceCompanyId) return toast.error("건설사(업체)를 선택해주세요")
+    if (!newInvoiceCompanyName.trim()) return toast.error("건설사명이 비어있습니다(회사 선택을 다시 해주세요)")
 
     const lineItems = newInvoiceLineItems
       .filter(li => li.description.trim() !== "")
@@ -288,7 +297,7 @@ export default function BillingPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           siteId: newInvoiceSiteId,
-          contractorName: newInvoiceContractor,
+          contractorName: newInvoiceCompanyName,
           notes: newInvoiceNotes,
           lineItems,
           attachments: newInvoiceAttachments,
@@ -310,9 +319,14 @@ export default function BillingPage() {
 
 
   const resetForm = () => {
+
     setNewInvoiceSiteId("")
-    setNewInvoiceContractor("")
     setNewInvoiceNotes("")
+
+    setNewInvoiceCompanyId("")
+    setNewInvoiceCompanyName("")
+    setNewInvoiceCompanyBizNo("")
+
     setNewInvoiceLineItems([
       { id: "new1", category: "인건비", description: "", quantity: 1, unitPrice: 0, amount: 0 }
     ])
@@ -355,7 +369,7 @@ export default function BillingPage() {
             </div>
             <Button onClick={() => setCreateDialogOpen(true)}>
               <Plus className="mr-2 h-4 w-4" />
-              청구서 작성
+              수기 청구서 작성
             </Button>
           </div>
         </div>
@@ -461,7 +475,7 @@ export default function BillingPage() {
               </p>
               <Button onClick={() => setCreateDialogOpen(true)}>
                 <Plus className="mr-2 h-4 w-4" />
-                청구서 작성
+                수기 청구서 작성
               </Button>
             </div>
           ) : (
@@ -582,11 +596,39 @@ export default function BillingPage() {
                   </Select>
                 </div>
                 <div className="grid gap-2">
-                  <Label>건설사명</Label>
-                  <Input
-                    value={newInvoiceContractor}
-                    onChange={(e) => setNewInvoiceContractor(e.target.value)}
-                    placeholder="예: 대림건설"
+                  <Label>건설사(업체)</Label>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => setCompanyPickerOpen(true)}
+                    >
+                      {newInvoiceCompanyId ? "회사 변경" : "회사 선택"}
+                    </Button>
+
+                    {newInvoiceCompanyId ? (
+                      <div className="min-w-0 text-sm">
+                        <div className="truncate font-medium">{newInvoiceCompanyName}</div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          사업자번호: {newInvoiceCompanyBizNo}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-muted-foreground">
+                        회사를 선택해 주세요.
+                      </div>
+                    )}
+                  </div>
+
+                  <CompanyPickerDialog
+                    open={companyPickerOpen}
+                    onOpenChange={setCompanyPickerOpen}
+                    onPick={(c: any) => {
+                      setNewInvoiceCompanyId(String(c.id))
+                      setNewInvoiceCompanyName(String(c.name ?? ""))
+                      setNewInvoiceCompanyBizNo(String(c.biz_no ?? ""))
+                    }}
                   />
                 </div>
               </div>

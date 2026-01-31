@@ -479,11 +479,11 @@ export function renderLaborInvoicePDF({
 
   const issued = kstYmd(
     invoice?.issuedAt ??
-    invoice?.issue_date ??
-    invoice?.date ??
-    invoice?.created_at ??
-    periodEnd ??
-    periodStart
+      invoice?.issue_date ??
+      invoice?.date ??
+      invoice?.created_at ??
+      periodEnd ??
+      periodStart
   );
 
   const monthTitle = (() => {
@@ -491,14 +491,42 @@ export function renderLaborInvoicePDF({
     return Number.isFinite(m) ? `${m} 월 노무비 청구서` : "노무비 청구서";
   })();
 
-  const siteName = safe(meta.siteName || site?.name || "");
+  // ✅ 상단에 “현장 하나”를 고정 표시하는 UX를 없애기 위해,
+  // siteName을 상단/본문 공통값으로 쓰지 않는다.
+  // (row 단위로 siteName을 추출해서 표시)
   const recipientName = safe(company?.name || meta.recipientName || invoice?.contractor_name || "");
   const recipientAddr = safe(company?.address || meta.recipientAddress || "");
 
   const dates: any[] = Array.isArray(meta.dates) ? meta.dates : [];
   const roleRows: any[] = Array.isArray(meta.roleRows) ? meta.roleRows : [];
 
+  console.log(roleRows[0])
+
   const totalIncl = nnum(invoice?.total ?? meta.grandTotal ?? meta.total ?? 0);
+
+  // =========================
+  // 2-1) Row별 현장명 추출(핵심 버그 수정)
+  // =========================
+  const getRowSiteName = (row: any) => {
+    // 가능한 케이스들을 최대한 커버
+    const direct =
+      row?.siteName ??
+      row?.site_name ??
+      row?.site?.name ??
+      row?.site?.siteName ??
+      row?.meta?.siteName ??
+      row?.meta?.site_name ??
+      null;
+
+    // row.site가 문자열로 들어오는 케이스도 보정
+    const fromString = typeof row?.site === "string" ? row.site : null;
+
+    const name = safe(direct ?? fromString ?? "", "");
+
+    // “여러 현장 가능” 문서에서 상단은 비우되, 행에서도 정보가 없으면 빈칸 처리
+    // (원하면 "-"로 바꿔도 됨)
+    return name;
+  };
 
   // =========================
   // 3) Layout blocks (상단: 너가 좋다고 한 부분 유지)
@@ -531,15 +559,19 @@ export function renderLaborInvoicePDF({
 
   drawLine(xR, topBoxY, xR, topBoxY + topBlockH, TH_MAJOR);
 
-  // Left top: date/company/site/period + phrase
+  // Left top: date/company/address/period + phrase
   // ✅ left-top block: label column width 고정
-  const LEFT_LABEL_W = 92;   // 핵심: 모든 줄 동일
+  const LEFT_LABEL_W = 92; // 핵심: 모든 줄 동일
   const LEFT_ROW_H = 20;
   const LEFT_PAD_X = 6;
 
   let ly = topBoxY + topBlockH - 30;
 
-  const drawLeftKV = (label: string, value: string, opts?: { valueFont?: any; valueSize?: number }) => {
+  const drawLeftKV = (
+    label: string,
+    value: string,
+    opts?: { valueFont?: any; valueSize?: number }
+  ) => {
     drawTextInCell(label, xL, ly, LEFT_LABEL_W, LEFT_ROW_H, {
       font: fontReg,
       size: 9.5,
@@ -562,9 +594,10 @@ export function renderLaborInvoicePDF({
   drawLeftKV("일자", issued);
   drawLeftKV("회사명", recipientName, { valueFont: fontBold, valueSize: 11 });
   drawLeftKV("소재지", recipientAddr);
-  drawLeftKV("현장", siteName);
   drawLeftKV("기간", periodLabel);
 
+  // ✅ (요청사항) 상단에 “현장” 단일 텍스트를 표시하지 않는다.
+  // drawLeftKV("현장", "...") 같은 줄이 생기지 않도록 의도적으로 제거/미사용
 
   drawTextInCell(`아래와 같이 계산 청구합니다`, xL, topBoxY + 8, leftW, 18, {
     font: fontReg,
@@ -590,7 +623,7 @@ export function renderLaborInvoicePDF({
   const rY = topBoxY;
   const rH = topBlockH;
 
-  const sumRowH = 24;         // 합계금액 고정
+  const sumRowH = 24; // 합계금액 고정
   const infoH = rH - sumRowH; // 정보영역
   drawRect(rX, rY, rightW, rH, TH_MAJOR, C_LINE);
   drawLine(rX, rY + sumRowH, rX + rightW, rY + sumRowH, TH_MAJOR);
@@ -599,8 +632,19 @@ export function renderLaborInvoicePDF({
 
   const drawInfoPair = (x: number, y: number, w: number, h: number, label: string, value: string) => {
     drawLine(x + labelW, y, x + labelW, y + h, TH_MINOR, C_LINE_SOFT);
-    drawTextInCell(label, x, y, labelW, h, { font: fontReg, size: 8.8, align: "center", color: C_MUTED, noEllipsis: true });
-    drawTextInCell(value, x + labelW, y, w - labelW, h, { font: fontReg, size: 8.8, align: "left", padX: 5 });
+    drawTextInCell(label, x, y, labelW, h, {
+      font: fontReg,
+      size: 8.8,
+      align: "center",
+      color: C_MUTED,
+      noEllipsis: true,
+    });
+    drawTextInCell(value, x + labelW, y, w - labelW, h, {
+      font: fontReg,
+      size: 8.8,
+      align: "left",
+      padX: 5,
+    });
   };
 
   type InfoRow =
@@ -617,7 +661,11 @@ export function renderLaborInvoicePDF({
   if (bankName || bankAccount || bankHolder) {
     const bankLine = [bankName, bankAccount].filter(Boolean).join(" ");
     const holderLine = bankHolder ? `예금주:${bankHolder}` : "";
-    infoRows.push({ type: "single", label: "계  좌", value: [bankLine, holderLine].filter(Boolean).join(" / ") });
+    infoRows.push({
+      type: "single",
+      label: "계  좌",
+      value: [bankLine, holderLine].filter(Boolean).join(" / "),
+    });
   }
 
   const infoRowH = Math.floor(infoH / infoRows.length);
@@ -640,11 +688,23 @@ export function renderLaborInvoicePDF({
   // 합계금액(하단 고정 영역)
   const sumLabelW = 60;
   drawLine(rX + sumLabelW, rY, rX + sumLabelW, rY + sumRowH, TH_MAJOR, C_LINE_SOFT);
-  drawTextInCell("합계금액", rX, rY, sumLabelW, sumRowH, { font: fontReg, size: 9, align: "center", color: C_MUTED, noEllipsis: true });
-  drawTextInCell(`${formatWonNum(totalIncl)}원`, rX + sumLabelW, rY, rightW - sumLabelW, sumRowH, { font: fontBold, size: 10.5, align: "left", padX: 6, noEllipsis: true });
+  drawTextInCell("합계금액", rX, rY, sumLabelW, sumRowH, {
+    font: fontReg,
+    size: 9,
+    align: "center",
+    color: C_MUTED,
+    noEllipsis: true,
+  });
+  drawTextInCell(`${formatWonNum(totalIncl)}원`, rX + sumLabelW, rY, rightW - sumLabelW, sumRowH, {
+    font: fontBold,
+    size: 10.5,
+    align: "left",
+    padX: 6,
+    noEllipsis: true,
+  });
 
   // =========================
-  // 4) Main Grid (표) — 아래 문제(공수 … / 헤더 쏠림 / 칸구분선) 해결 버전
+  // 4) Main Grid (표)
   // =========================
   const gridTop = topBoxY - gapAfterTop;
   const bottomReserve = 18 + 38;
@@ -818,15 +878,15 @@ export function renderLaborInvoicePDF({
 
     const unitPriceRaw = nnum(
       row.unitPrice ??
-      row.unit_price ??
-      row.unitCost ??
-      row.unit_cost ??
-      row.rate ??
-      row.dailyWage ??
-      row.daily_wage ??
-      row.price ??
-      row.unit ??
-      0
+        row.unit_price ??
+        row.unitCost ??
+        row.unit_cost ??
+        row.rate ??
+        row.dailyWage ??
+        row.daily_wage ??
+        row.price ??
+        row.unit ??
+        0
     );
 
     const vals31 = normalizeDayVals31(row);
@@ -836,14 +896,14 @@ export function renderLaborInvoicePDF({
 
     const amountExVat = nnum(
       row.amountExVat ??
-      row.amount_ex_vat ??
-      row.amount ??
-      row.totalAmount ??
-      row.total_amount ??
-      row.sum ??
-      row.total ??
-      row.gross ??
-      unitPriceRaw * manDays
+        row.amount_ex_vat ??
+        row.amount ??
+        row.totalAmount ??
+        row.total_amount ??
+        row.sum ??
+        row.total ??
+        row.gross ??
+        unitPriceRaw * manDays
     );
 
     const unitPrice = unitPriceRaw > 0 ? unitPriceRaw : manDays > 0 ? Math.round(amountExVat / manDays) : 0;
@@ -851,8 +911,16 @@ export function renderLaborInvoicePDF({
     sumManDays += manDays;
     sumAmountExVat += amountExVat;
 
+    // ✅ row별로 “진짜 현장명”을 찍는다 (핵심 버그 수정)
+    const rowSiteName = getRowSiteName(row);
+
     // left columns
-    drawTextInCell(siteName, gridX, y, colSiteW, rowH, { font: fontReg, size: 7.0, align: "center" });
+    drawTextInCell(rowSiteName, gridX, y, colSiteW, rowH, {
+      font: fontReg,
+      size: 7.0,
+      align: "center",
+      // 현장명은 짧게만 보여야 해서 ellipsis 허용(기존 drawTextInCell 기본값)
+    });
     drawTextInCell(roleName, gridX + colSiteW, y, colRoleW, rowH, { font: fontReg, size: 7.0, align: "center" });
 
     // ✅ day columns: 숫자(공수) 전용 렌더러로만 출력 -> "..."로 바뀌는 현상 원천 차단 [Source](https://www.genspark.ai/api/files/s/rrpEfMQh)
@@ -955,6 +1023,7 @@ export function renderLaborInvoicePDF({
 
   return page;
 }
+
 
 
 

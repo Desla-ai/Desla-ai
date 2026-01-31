@@ -71,9 +71,14 @@ export default function HomePage() {
     .reduce((sum, s) => sum + s.amount, 0)
 
   const [invoices, setInvoices] = useState([])
+
+  const draftInvoiceCount = invoices.filter((i: any) => i?.status === "초안").length
+  const issuedInvoiceCount = invoices.filter((i: any) => i?.status === "발행").length
+  const paidInvoiceCount = invoices.filter((i: any) => i?.status === "입금완료").length
+
   useEffect(() => {
     ; (async () => {
-      const res = await fetch("/api/invoices?status=pending", { cache: "no-store" })
+      const res = await fetch("/api/invoices?status=all", { cache: "no-store" })
       const data = await res.json()
       setInvoices(data.invoices ?? [])
     })()
@@ -210,19 +215,19 @@ export default function HomePage() {
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <KpiCard
             title="청구서 초안"
-            value={`${state.settlementRecords.filter((r) => r.status === "지급대기").length}건`}
+            value={`${draftInvoiceCount}건`}
             icon={Receipt}
             variant="default"
           />
           <KpiCard
             title="발행 (미수금)"
-            value={formatKoreanMoney(pendingBillings)}
+            value={`${issuedInvoiceCount}건`}
             icon={AlertCircle}
             variant="warning"
           />
           <KpiCard
             title="입금완료"
-            value={formatKoreanMoney(completedBillings)}
+            value={`${paidInvoiceCount}건`}
             icon={CheckCircle}
             variant="success"
           />
@@ -290,19 +295,6 @@ export default function HomePage() {
                   )}
                 </div>
               </ScrollArea>
-              {settlementCompleteSites.length > 0 && settlementCompleteSites.length <= 5 && (
-                <div className="px-4 py-3 border-t border-border">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="w-full"
-                    onClick={handleNavigateToCompletedSettlements}
-                  >
-                    금액 확정 현장 보기
-                    <ChevronRight className="ml-1 h-4 w-4" />
-                  </Button>
-                </div>
-              )}
             </CardContent>
           </Card>
 

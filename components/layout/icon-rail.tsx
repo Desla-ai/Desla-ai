@@ -10,6 +10,7 @@ import {
   Settings,
   FileText,
   Receipt,
+  HardHat
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
@@ -21,7 +22,7 @@ import {
 
 const navItems = [
   { href: "/home", icon: Home, label: "홈" },
-  { href: "/sites", icon: Building2, label: "현장" },
+  { href: "/sites", icon: HardHat, label: "현장" },
   { href: "/companies", icon: Building2, label: "회사" },
   { href: "/workers", icon: Users, label: "인력" },
   { href: "/settlement", icon: Receipt, label: "정산" },

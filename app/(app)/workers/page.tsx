@@ -66,6 +66,20 @@ export default function WorkersPage() {
   const [newWorkerTeam, setNewWorkerTeam] = useState<"반장" | "팀원" | "">("")
   const [newWorkerRoles, setNewWorkerRoles] = useState<string[]>([])
 
+  // ID (required)
+  const [newWorkerIdFront6, setNewWorkerIdFront6] = useState("")
+  const [newWorkerIdBack1, setNewWorkerIdBack1] = useState("")
+  const [newWorkerIdFrontFile, setNewWorkerIdFrontFile] = useState<File | null>(null)
+  const [newWorkerIdBackFile, setNewWorkerIdBackFile] = useState<File | null>(null)
+  const [isSubmittingNewWorker, setIsSubmittingNewWorker] = useState(false)
+
+
+  const [newWorkerIdFrontPath, setNewWorkerIdFrontPath] = useState("")
+  const [newWorkerIdBackPath, setNewWorkerIdBackPath] = useState("")
+
+  const [isUploadingIds, setIsUploadingIds] = useState(false)
+
+
   // Open add worker dialog if action=add in URL
   useEffect(() => {
     if (searchParams.get("action") === "add") {
@@ -127,29 +141,93 @@ export default function WorkersPage() {
     toast.success(`${worker.name}님이 ${newStatus}(으)로 변경되었습니다`)
   }
 
+  const uploadWorkerIdSide = async (tempKey: string, side: "front" | "back", file: File) => {
+    const initRes = await fetch("/api/uploads/worker-ids/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tempKey,
+        side,
+        fileName: file.name,
+        mime: file.type,
+        size: file.size,
+      }),
+    });
+
+    const initJson = await initRes.json();
+    if (!initRes.ok) throw new Error(initJson?.error ?? "업로드 초기화에 실패했습니다.");
+
+    const { uploadUrl, path } = initJson as { uploadUrl: string; path: string };
+    if (!uploadUrl || !path) throw new Error("업로드 URL이 비어있습니다.");
+
+    // Supabase signed upload url은 PUT로 업로드
+    const putRes = await fetch(uploadUrl, {
+      method: "PUT",
+      body: file,
+    });
+
+
+    if (!putRes.ok) {
+      const text = await putRes.text().catch(() => "");
+      throw new Error(`파일 업로드 실패: ${putRes.status} ${text.slice(0, 300)}`);
+    }
+    return path;
+  };
+
   const handleAddWorker = async () => {
     if (!newWorkerName.trim() || !newWorkerPhone.trim()) {
-      toast.error("이름과 전화번호를 입력해주세요")
-      return
+      toast.error("이름과 전화번호를 입력해주세요");
+      return;
     }
 
+    // ✅ 신분증 필수
+    if (!/^\d{6}$/.test(newWorkerIdFront6) || !/^\d{1}$/.test(newWorkerIdBack1)) {
+      toast.error("주민/외국인등록번호 앞6(숫자6자리) + 뒤1(숫자1자리)을 입력해주세요");
+      return;
+    }
+    if (!newWorkerIdFrontFile || !newWorkerIdBackFile) {
+      toast.error("신분증 사본(앞/뒤) 2장을 모두 업로드해주세요");
+      return;
+    }
+
+    setIsSubmittingNewWorker(true);
+
     try {
+      // ✅ tempKey로 _pending 경로에 업로드
+      const tempKey =
+        (globalThis.crypto?.randomUUID?.() as string | undefined) ??
+        `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+      const [idCopyFrontPath, idCopyBackPath] = await Promise.all([
+        uploadWorkerIdSide(tempKey, "front", newWorkerIdFrontFile),
+        uploadWorkerIdSide(tempKey, "back", newWorkerIdBackFile),
+      ]);
+
       await addWorker({
         name: newWorkerName,
         phone: newWorkerPhone.replace(/\D/g, ""),
-        roles: state.roles.filter((r) => newWorkerRoles.includes(r.id)), // 이제 r.id가 uuid
+        roles: state.roles.filter((r) => newWorkerRoles.includes(r.id)),
         team: newWorkerTeam || null,
         status: "미출근",
         lastAttendance: null,
-      })
 
-      toast.success("새 인력이 등록되었습니다")
-      setAddWorkerDialogOpen(false)
-      resetNewWorkerForm()
+        // ✅ 서버가 받는 필드(POST에서 camel/snake 모두 허용)
+        idFront6: newWorkerIdFront6,
+        idBack1: newWorkerIdBack1,
+        idCopyFrontPath,
+        idCopyBackPath,
+      });
+
+      toast.success("새 인력이 등록되었습니다");
+      setAddWorkerDialogOpen(false);
+      resetNewWorkerForm();
     } catch (e: any) {
-      toast.error(e?.message ?? "인력 등록에 실패했습니다")
+      toast.error(e?.message ?? "인력 등록에 실패했습니다");
+    } finally {
+      setIsSubmittingNewWorker(false);
     }
-  }
+  };
+
 
 
 
@@ -158,7 +236,16 @@ export default function WorkersPage() {
     setNewWorkerPhone("")
     setNewWorkerTeam("")
     setNewWorkerRoles([])
+
+    setNewWorkerIdFront6("")
+    setNewWorkerIdBack1("")
+    setNewWorkerIdFrontFile(null)
+    setNewWorkerIdBackFile(null)
+    setNewWorkerIdFrontPath("")
+    setNewWorkerIdBackPath("")
+    setIsUploadingIds(false)
   }
+
 
   const clearFilters = () => {
     setSearch("")
@@ -457,6 +544,45 @@ export default function WorkersPage() {
               />
             </div>
             <div className="grid gap-2">
+              <Label>주민/외국인등록번호</Label>
+              <div className="grid grid-cols-2 gap-2">
+                <Input
+                  value={newWorkerIdFront6}
+                  onChange={(e) => setNewWorkerIdFront6(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="앞 6자리 (YYMMDD)"
+                  inputMode="numeric"
+                />
+                <Input
+                  value={newWorkerIdBack1}
+                  onChange={(e) => setNewWorkerIdBack1(e.target.value.replace(/\D/g, "").slice(0, 1))}
+                  placeholder="뒤 1자리"
+                  inputMode="numeric"
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                앞 6자리 + 뒤 1자리는 서버에 암호화 저장되며, 중복 등록은 차단됩니다.
+              </p>
+            </div>
+
+            <div className="grid gap-2">
+              <Label>신분증 사본 (앞/뒤) — 필수</Label>
+              <div className="grid grid-cols-2 gap-2">
+                <Input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => setNewWorkerIdFrontFile(e.target.files?.[0] ?? null)}
+                />
+                <Input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => setNewWorkerIdBackFile(e.target.files?.[0] ?? null)}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                JPG/PNG 등 이미지 파일을 업로드하세요.
+              </p>
+            </div>
+            <div className="grid gap-2">
               <Label>역할 (다중 선택)</Label>
               <div className="flex flex-wrap gap-2">
                 {state.roles.map((role) => (
@@ -503,7 +629,9 @@ export default function WorkersPage() {
             <Button variant="outline" onClick={() => setAddWorkerDialogOpen(false)}>
               취소
             </Button>
-            <Button onClick={handleAddWorker}>등록</Button>
+            <Button onClick={handleAddWorker} disabled={isSubmittingNewWorker}>
+              {isSubmittingNewWorker ? "등록 중..." : "등록"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

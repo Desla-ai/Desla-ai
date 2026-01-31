@@ -3,6 +3,7 @@ import { cookies } from "next/headers"
 import { verifySessionCookie, SESSION_COOKIE_NAME } from "@/lib/server/session"
 import { supabaseAdmin } from "@/lib/server/supabase-admin"
 import { toWorkerDTO } from "@/lib/server/worker-dto"
+import { encryptText, hmacIdentity } from "@/lib/server/worker-id-crypto";
 
 // 관계명이 roles일 수도/role일 수도 있어 둘 다 select(하나만 실제로 채워질 것)
 const WORKER_SELECT_WITH_ROLES = `
@@ -108,12 +109,35 @@ export async function GET() {
   }
 }
 
+function assertIdParts(front6: string, back1: string) {
+  if (!/^\d{6}$/.test(front6)) throw new Error("주민/외국인등록번호 앞 6자리는 숫자 6자리여야 합니다.");
+  if (!/^\d{1}$/.test(back1)) throw new Error("주민/외국인등록번호 뒤 1자리는 숫자 1자리여야 합니다.");
+}
+
 export async function POST(req: Request) {
   const cookieStore = await cookies()
   const session = verifySessionCookie(cookieStore.get(SESSION_COOKIE_NAME)?.value)
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
   const body = await req.json()
+
+  const idFront6 = String(body?.idFront6 ?? body?.id_front6 ?? "").trim();
+  const idBack1 = String(body?.idBack1 ?? body?.id_back1 ?? "").trim();
+
+  const idCopyFrontPath = String(body?.idCopyFrontPath ?? body?.id_copy_front_path ?? "").trim();
+  const idCopyBackPath = String(body?.idCopyBackPath ?? body?.id_copy_back_path ?? "").trim();
+
+  try {
+    assertIdParts(idFront6, idBack1);
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message ?? "invalid id parts" }, { status: 400 });
+  }
+
+  if (!idCopyFrontPath || !idCopyBackPath) {
+    return NextResponse.json({ error: "신분증 사본(앞/뒤) 2장을 모두 업로드해주세요." }, { status: 400 });
+  }
+
+  const idHash = hmacIdentity(session.officeId, idFront6, idBack1);
 
   if (typeof body?.name !== "string" || !body.name.trim()) {
     return NextResponse.json({ error: "name is required" }, { status: 400 })
@@ -135,6 +159,13 @@ export async function POST(req: Request) {
     last_attendance: body.last_attendance ?? body.lastAttendance ?? null,
   }
 
+  payload.id_front6 = encryptText(idFront6);
+  payload.id_back1 = encryptText(idBack1);
+  payload.id_hash = idHash;
+  payload.id_copy_front_path = idCopyFrontPath;
+  payload.id_copy_back_path = idCopyBackPath;
+  payload.id_copy_uploaded_at = new Date().toISOString();
+
   // ✅ team 저장 (컬럼 추가했으니 활성화)
   if ("team" in body) payload.team = body.team ?? null
   if ("teamLeaderId" in body || "team_leader_id" in body) {
@@ -149,10 +180,17 @@ export async function POST(req: Request) {
     .from("workers")
     .insert(payload)
     .select("*")
-    .single()
+    .single();
 
-  if (insErr) return NextResponse.json({ error: insErr.message }, { status: 500 })
-  if (!inserted) return NextResponse.json({ error: "Insert failed" }, { status: 500 })
+  if (insErr) {
+    // Supabase/Postgres unique 위반은 보통 code 23505
+    const anyErr = insErr as any;
+    if (anyErr?.code === "23505") {
+      return NextResponse.json({ error: "이미 등록된 인력입니다(주민/외국인번호 중복)." }, { status: 409 });
+    }
+    return NextResponse.json({ error: insErr.message }, { status: 500 });
+  }
+
 
   // 2) role_ids 또는 roles 지원
   let roleIds: string[] = []
