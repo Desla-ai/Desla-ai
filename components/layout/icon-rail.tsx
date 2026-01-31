@@ -22,6 +22,7 @@ import {
 const navItems = [
   { href: "/home", icon: Home, label: "홈" },
   { href: "/sites", icon: Building2, label: "현장" },
+  { href: "/companies", icon: Building2, label: "회사" },
   { href: "/workers", icon: Users, label: "인력" },
   { href: "/settlement", icon: Receipt, label: "정산" },
   { href: "/billing", icon: FileText, label: "청구" },

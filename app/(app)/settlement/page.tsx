@@ -1291,11 +1291,10 @@ function WorkforceSettlementTab({
 
 
 
-  // Complete scope
   const handleCompleteScope = async () => {
     if (!siteId) return
 
-    // ✅ 선택 없음 방지(서버도 400을 권장하지만, 프론트도 안전하게)
+    // ✅ 선택 없음 방지
     if (selectedIds.length === 0) {
       toast.error("선택된 정산 대상이 없습니다")
       return
@@ -1310,7 +1309,7 @@ function WorkforceSettlementTab({
       teamLeaderIds: selectedTeamLeaderIds,
     }
 
-    // 혹시라도 workerIds/teamLeaderIds가 모두 비는 경우 방지(팀/개인 판별 꼬임 대비)
+    // 혹시라도 workerIds/teamLeaderIds가 모두 비는 경우 방지
     if (basePayload.workerIds.length === 0 && basePayload.teamLeaderIds.length === 0) {
       toast.error("정산 대상(인력/팀)을 확인할 수 없습니다. 다시 선택해주세요.")
       return
@@ -1322,29 +1321,30 @@ function WorkforceSettlementTab({
       const res = await fetch("/api/payout-items/settle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(basePayload),
+        body: JSON.stringify(basePayload), // ✅ 기본은 NORMAL (서버 기본값)
       })
 
       const json = await res.json().catch(() => ({}))
 
       if (!res.ok) {
         const msg = String(json?.error ?? "정산확정 실패")
+        const code = String(json?.code ?? "")
 
-        // ✅ 본정산이 PAID로 마감된 경우 → 추가분(하루)로 유도
-        if (res.status === 409 && msg.includes("already PAID")) {
-          setPendingSettlePayload({
-            ...basePayload,
-            selectedLabel,
-          })
-          setAdjustmentDialogOpen(true)
+        // ✅ 새 서버(v17 패치) 기준: 409는 '추가 정산할 항목 없음' 또는 upsert 실패 등
+        if (res.status === 409 && code === "NO_ADJUSTMENT_ITEMS") {
+          toast.error("추가 정산할 항목이 없습니다. (이미 지급된 금액과 동일하거나 추가 근무기록이 없습니다)")
+          return
+        }
+        if (res.status === 409 && code === "UPSERT_EMPTY") {
+          toast.error("정산 항목 생성에 실패했습니다. (잠시 후 다시 시도해주세요)")
           return
         }
 
         throw new Error(msg)
       }
+
       const warnings = Array.isArray(json?.warnings) ? json.warnings : []
       warnings.forEach((w: string) => toast.warning(w))
-
 
       toast.success(`정산 확정 완료 (${selectedLabel})`)
 
@@ -1360,6 +1360,7 @@ function WorkforceSettlementTab({
       setIsCompletingScope(false)
     }
   }
+
 
   const handleCreateAdjustment = async () => {
     if (!pendingSettlePayload) return
@@ -1377,13 +1378,29 @@ function WorkforceSettlementTab({
           workerIds: pendingSettlePayload.workerIds,
           teamLeaderIds: pendingSettlePayload.teamLeaderIds,
 
-          // ✅ 추가분(기간) 무한 생성
+          // ✅ 추가분 정산 생성
           settleMode: "ADJUSTMENT",
         }),
       })
 
       const json = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json?.error ?? "추가분 정산 생성 실패")
+
+      if (!res.ok) {
+        const msg = String(json?.error ?? "추가분 정산 생성 실패")
+        const code = String(json?.code ?? "")
+
+        // ✅ 서버가 '추가 정산할 항목 없음'을 409로 줄 수 있음
+        if (res.status === 409 && code === "NO_ADJUSTMENT_ITEMS") {
+          toast.error("추가 정산할 항목이 없습니다. (이미 지급된 금액과 동일하거나 추가 근무기록이 없습니다)")
+          return
+        }
+        if (res.status === 409 && code === "UPSERT_EMPTY") {
+          toast.error("추가분 정산 항목 생성에 실패했습니다. (잠시 후 다시 시도해주세요)")
+          return
+        }
+
+        throw new Error(msg)
+      }
 
       const warnings = Array.isArray(json?.warnings) ? json.warnings : []
       warnings.forEach((w: string) => toast.warning(w))
@@ -1404,6 +1421,7 @@ function WorkforceSettlementTab({
       setIsCompletingScope(false)
     }
   }
+
 
 
   if (!siteId) {
