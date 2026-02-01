@@ -26,13 +26,23 @@ export interface AppSnapshot {
   timestamp: string
   data: AppState
   metrics: {
+    // 기존(필수)
     siteCount: number
     waitingWorkers: number
     assignedWorkers: number
+
+    // 기존 필드(하위호환용): 예전 스냅샷/화면에서 쓰던 값.
+    // 이제 KPI에서는 안 쓰더라도, API/DB/기존 레코드 호환을 위해 유지 권장.
     pendingPayments: number
     pendingBillings: number
+
+    // ✅ 신규(운영용): RecordsPage에서 표시할 값들
+    workingWorkers?: number
+    fixedWorkers?: number
+    siteStatusCounts?: Record<string, number> // "미진행" | "배차대기" | "배차완료" | "금액확정" 카운트
   }
 }
+
 
 // Settlement record with full details for restoration
 export interface SettlementRecord {
@@ -546,6 +556,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   }, [])
 
   // Snapshots
+
   const SNAPSHOT_LIMIT = 100
 
   const getSnapshots = useCallback(async () => {
@@ -557,21 +568,38 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
 
   const saveSnapshot = useCallback(
     async (title: string) => {
-      // metrics는 기존 코드처럼 state로 계산 (원하면 기존 로직 그대로 복사)
-      const waitingWorkers = state.workers.filter((w: any) => w.status === "미출근").length
-      const assignedWorkers = state.workers.filter((w: any) => w.status === "배치").length
-      const pendingPayments = 0
-      const pendingBillings = 0
+      // ✅ 운영 지표(metrics): 현장 상태 + 인력 상태(미출근/출근/배치) + 고정배치
+      const waitingWorkers = state.workers.filter((w) => w.status === "미출근").length
+      const workingWorkers = state.workers.filter((w) => w.status === "출근").length
+      const assignedWorkers = state.workers.filter((w) => w.status === "배치").length
+      const fixedWorkers = state.workers.filter((w: any) =>
+        Boolean((w as any).isFixed ?? (w as any).is_fixed)
+      ).length
+
+      const siteStatusCounts = state.sites.reduce((acc: Record<string, number>, s: any) => {
+        const st = String(s?.status ?? "")
+        if (!st) return acc
+        acc[st] = (acc[st] ?? 0) + 1
+        return acc
+      }, {})
 
       const payload = {
         title,
-        data: state, // ✅ AppState 전부 포함(네 요구사항)
+        data: state, // ✅ AppState 전부 저장: 현장 status 4종 + 인력 출근/배치/고정배치/기간까지 전부 복원 가능
         metrics: {
+          // 기존(필수) + RecordsPage 호환
           siteCount: state.sites.length,
           waitingWorkers,
           assignedWorkers,
-          pendingPayments,
-          pendingBillings,
+
+          // ✅ 신규 운영 지표
+          workingWorkers,
+          fixedWorkers,
+          siteStatusCounts,
+
+          // ✅ 하위호환 유지(예전 스냅샷/타입/DB 호환용)
+          pendingPayments: 0,
+          pendingBillings: 0,
         },
       }
 
@@ -592,6 +620,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     const res = await fetch(`/api/snapshots/${snapshot.id}`, { method: "GET" })
     if (!res.ok) throw new Error("snapshot load failed")
     const json = await res.json()
+
+    // ✅ 전체 복원(요구사항: 현장 상태 4종 + 인력 출근/배치/고정배치/기간까지 전부 롤백)
     setState(json.snapshot.data)
   }, [])
 
@@ -599,6 +629,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     const res = await fetch(`/api/snapshots/${snapshotId}`, { method: "DELETE" })
     if (!res.ok) throw new Error("snapshot delete failed")
   }, [])
+
+
 
 
   // Don't render children until hydrated to avoid hydration mismatch

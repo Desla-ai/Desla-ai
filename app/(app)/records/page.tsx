@@ -26,7 +26,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { useAppStore, type AppSnapshot } from "@/lib/app-store"
-import { formatKoreanMoney } from "@/lib/format"
 import {
   Save,
   RotateCcw,
@@ -35,12 +34,21 @@ import {
   Building2,
   Users,
   UserCheck,
-  Wallet,
-  Receipt,
   Database,
   FileArchive,
+  CalendarClock,
+  Link2,
 } from "lucide-react"
 import { toast } from "sonner"
+
+type SiteStatus = "미진행" | "배차대기" | "배차완료" | "금액확정"
+
+function countByStatus<T extends { status: string }>(items: T[]) {
+  return items.reduce((acc, it) => {
+    acc[it.status] = (acc[it.status] ?? 0) + 1
+    return acc
+  }, {} as Record<string, number>)
+}
 
 export default function RecordsPage() {
   const { state, saveSnapshot, loadSnapshot, getSnapshots, deleteSnapshot } = useAppStore()
@@ -55,18 +63,12 @@ export default function RecordsPage() {
   const [isRestoring, setIsRestoring] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
 
-
   useEffect(() => {
     ; (async () => {
       const list = await getSnapshots()
       setSnapshots(list)
     })()
   }, [getSnapshots])
-
-  const refreshSnapshots = async () => {
-    const list = await getSnapshots()
-    setSnapshots(list)
-  }
 
   const handleSave = async () => {
     if (isSaving) return
@@ -109,7 +111,6 @@ export default function RecordsPage() {
       setSnapshotToRestore(null)
       toast.success("스냅샷이 복원되었습니다")
 
-      // 복원 후 목록 갱신(선택)
       const list = await getSnapshots()
       setSnapshots(list)
     } catch {
@@ -144,6 +145,7 @@ export default function RecordsPage() {
       setIsDeleting(false)
     }
   }
+
   const formatTimestamp = (timestamp: string) => {
     const date = new Date(timestamp)
     return date.toLocaleString("ko-KR", {
@@ -155,19 +157,23 @@ export default function RecordsPage() {
     })
   }
 
-  // Current state metrics
+  // ✅ Current state metrics (운영 상태 중심)
+  const siteStatusCounts = countByStatus(state.sites as any)
+  const waitingWorkers = state.workers.filter((w) => w.status === "미출근").length
+  const workingWorkers = state.workers.filter((w) => w.status === "출근").length
+  const assignedWorkers = state.workers.filter((w) => w.status === "배치").length
+  const fixedWorkers = state.workers.filter((w: any) => Boolean((w as any).isFixed ?? (w as any).is_fixed)).length
+
   const currentMetrics = {
     siteCount: state.sites.length,
-    waitingWorkers: state.workers.filter((w) => w.status === "미출근").length,
-    assignedWorkers: state.workers.filter((w) => w.status === "배치" || w.status === "출근")
-      .length,
-    pendingPayments: state.settlements
-      .filter((s) => s.status === "지급대기")
-      .reduce((sum, s) => sum + s.amount, 0),
-    pendingBillings: state.settlements
-      .filter((s) => s.status === "청구대기")
-      .reduce((sum, s) => sum + s.amount, 0),
+    siteStatusCounts,
+    waitingWorkers,
+    workingWorkers,
+    assignedWorkers,
+    fixedWorkers,
   }
+
+  const getSiteStatusCount = (status: SiteStatus) => currentMetrics.siteStatusCounts[status] ?? 0
 
   return (
     <AppShell title="스냅샷 관리">
@@ -182,7 +188,8 @@ export default function RecordsPage() {
                   현재 상태
                 </CardTitle>
                 <CardDescription>
-                  현재 앱의 전체 상태를 스냅샷으로 저장할 수 있습니다
+                  스냅샷은 <b>현장 상태(미진행/배차대기/배차완료/금액확정)</b>와
+                  <b> 인력 상태(미출근/출근/배치/고정배치)</b>를 포함해 앱 상태를 해당 시점으로 되돌립니다.
                 </CardDescription>
               </div>
               <Button onClick={() => setSaveDialogOpen(true)}>
@@ -191,8 +198,10 @@ export default function RecordsPage() {
               </Button>
             </div>
           </CardHeader>
+
           <CardContent>
             <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-5">
+              {/* 1) 현장 수 */}
               <div className="flex items-center gap-3 rounded-lg border border-border p-3">
                 <div className="rounded-full bg-chart-2/20 p-2">
                   <Building2 className="h-4 w-4 text-chart-2" />
@@ -202,48 +211,108 @@ export default function RecordsPage() {
                   <p className="text-lg font-semibold">{currentMetrics.siteCount}</p>
                 </div>
               </div>
+
+              {/* 2) 미진행 */}
+              <div className="flex items-center gap-3 rounded-lg border border-border p-3">
+                <div className="rounded-full bg-muted/40 p-2">
+                  <CalendarClock className="h-4 w-4 text-muted-foreground" />
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">미진행</p>
+                  <p className="text-lg font-semibold">{getSiteStatusCount("미진행")}</p>
+                </div>
+              </div>
+
+              {/* 3) 배차대기 */}
+              <div className="flex items-center gap-3 rounded-lg border border-border p-3">
+                <div className="rounded-full bg-status-waiting/20 p-2">
+                  <CalendarClock className="h-4 w-4 text-status-waiting-foreground" />
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">배차대기</p>
+                  <p className="text-lg font-semibold">{getSiteStatusCount("배차대기")}</p>
+                </div>
+              </div>
+
+              {/* 4) 배차완료 */}
+              <div className="flex items-center gap-3 rounded-lg border border-border p-3">
+                <div className="rounded-full bg-status-progress/20 p-2">
+                  <CalendarClock className="h-4 w-4 text-status-progress-foreground" />
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">배차완료</p>
+                  <p className="text-lg font-semibold">{getSiteStatusCount("배차완료")}</p>
+                </div>
+              </div>
+
+              {/* 5) 금액확정 */}
+              <div className="flex items-center gap-3 rounded-lg border border-border p-3">
+                <div className="rounded-full bg-status-pending/20 p-2">
+                  <CalendarClock className="h-4 w-4 text-status-pending-foreground" />
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">금액확정</p>
+                  <p className="text-lg font-semibold">{getSiteStatusCount("금액확정")}</p>
+                </div>
+              </div>
+
+              {/* 6) 인력 수(전체) - 신규 */}
+              <div className="flex items-center gap-3 rounded-lg border border-border p-3">
+                <div className="rounded-full bg-primary/10 p-2">
+                  <Users className="h-4 w-4 text-primary" />
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">인력 수</p>
+                  <p className="text-lg font-semibold">{state.workers.length}명</p>
+                </div>
+              </div>
+
+              {/* 7) 미출근 */}
               <div className="flex items-center gap-3 rounded-lg border border-border p-3">
                 <div className="rounded-full bg-status-waiting/20 p-2">
                   <Users className="h-4 w-4 text-status-waiting-foreground" />
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">미출근 인원</p>
+                  <p className="text-xs text-muted-foreground">미출근</p>
                   <p className="text-lg font-semibold">{currentMetrics.waitingWorkers}명</p>
                 </div>
               </div>
+
+              {/* 8) 출근 */}
               <div className="flex items-center gap-3 rounded-lg border border-border p-3">
                 <div className="rounded-full bg-status-progress/20 p-2">
                   <UserCheck className="h-4 w-4 text-status-progress-foreground" />
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">배치 인원</p>
+                  <p className="text-xs text-muted-foreground">출근</p>
+                  <p className="text-lg font-semibold">{currentMetrics.workingWorkers}명</p>
+                </div>
+              </div>
+
+              {/* 9) 배치 */}
+              <div className="flex items-center gap-3 rounded-lg border border-border p-3">
+                <div className="rounded-full bg-status-progress/15 p-2">
+                  <Link2 className="h-4 w-4 text-status-progress-foreground" />
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">배치</p>
                   <p className="text-lg font-semibold">{currentMetrics.assignedWorkers}명</p>
                 </div>
               </div>
+
+              {/* 10) 고정배치 */}
               <div className="flex items-center gap-3 rounded-lg border border-border p-3">
-                <div className="rounded-full bg-chart-1/20 p-2">
-                  <Wallet className="h-4 w-4 text-chart-1" />
+                <div className="rounded-full bg-primary/10 p-2">
+                  <FileArchive className="h-4 w-4 text-primary" />
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">지급대기</p>
-                  <p className="text-sm font-semibold">
-                    {formatKoreanMoney(currentMetrics.pendingPayments)}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-3 rounded-lg border border-border p-3">
-                <div className="rounded-full bg-status-pending/20 p-2">
-                  <Receipt className="h-4 w-4 text-status-pending-foreground" />
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">청구대기</p>
-                  <p className="text-sm font-semibold">
-                    {formatKoreanMoney(currentMetrics.pendingBillings)}
-                  </p>
+                  <p className="text-xs text-muted-foreground">고정배치</p>
+                  <p className="text-lg font-semibold">{currentMetrics.fixedWorkers}명</p>
                 </div>
               </div>
             </div>
           </CardContent>
+
         </Card>
 
         {/* Saved Snapshots */}
@@ -254,9 +323,10 @@ export default function RecordsPage() {
               저장된 스냅샷 ({snapshots.length}개)
             </CardTitle>
             <CardDescription>
-              저장된 스냅샷을 복원하면 모든 화면의 데이터가 해당 시점으로 되돌아갑니다
+              저장된 스냅샷을 복원하면 모든 화면의 데이터가 해당 시점으로 되돌아갑니다.
             </CardDescription>
           </CardHeader>
+
           <CardContent>
             {snapshots.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -281,35 +351,39 @@ export default function RecordsPage() {
                           {formatTimestamp(snapshot.timestamp)}
                         </Badge>
                       </div>
+
+                      {/* ✅ Snapshot Metrics: 운영 중심 */}
                       <div className="flex flex-wrap gap-3 text-sm text-muted-foreground">
                         <span className="flex items-center gap-1">
                           <Building2 className="h-3 w-3" />
-                          현장 {snapshot.metrics.siteCount}
+                          현장 {snapshot.metrics?.siteCount ?? "-"}
                         </span>
                         <span className="flex items-center gap-1">
                           <Users className="h-3 w-3" />
-                          미출근 {snapshot.metrics.waitingWorkers}명
+                          미출근 {snapshot.metrics?.waitingWorkers ?? "-"}명
                         </span>
                         <span className="flex items-center gap-1">
                           <UserCheck className="h-3 w-3" />
-                          배치 {snapshot.metrics.assignedWorkers}명
+                          배치 {snapshot.metrics?.assignedWorkers ?? "-"}명
                         </span>
-                        <span className="flex items-center gap-1">
-                          <Wallet className="h-3 w-3" />
-                          지급대기 {formatKoreanMoney(snapshot.metrics.pendingPayments)}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Receipt className="h-3 w-3" />
-                          청구대기 {formatKoreanMoney(snapshot.metrics.pendingBillings)}
-                        </span>
+                        {/* 아래 항목은 metrics 확장 후 표시되도록 안전하게 optional로 둠 */}
+                        {"workingWorkers" in (snapshot.metrics as any) && (
+                          <span className="flex items-center gap-1">
+                            <UserCheck className="h-3 w-3" />
+                            출근 {(snapshot.metrics as any).workingWorkers}명
+                          </span>
+                        )}
+                        {"fixedWorkers" in (snapshot.metrics as any) && (
+                          <span className="flex items-center gap-1">
+                            <FileArchive className="h-3 w-3" />
+                            고정배치 {(snapshot.metrics as any).fixedWorkers}명
+                          </span>
+                        )}
                       </div>
                     </div>
+
                     <div className="flex gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleRestoreClick(snapshot)}
-                      >
+                      <Button variant="outline" size="sm" onClick={() => handleRestoreClick(snapshot)}>
                         <RotateCcw className="mr-2 h-4 w-4" />
                         복원
                       </Button>
@@ -405,7 +479,8 @@ export default function RecordsPage() {
           <AlertDialogFooter>
             <AlertDialogCancel>취소</AlertDialogCancel>
             <AlertDialogAction
-              onClick={handleDeleteConfirm} disabled={isDeleting}
+              onClick={handleDeleteConfirm}
+              disabled={isDeleting}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               <Trash2 className="mr-2 h-4 w-4" />
