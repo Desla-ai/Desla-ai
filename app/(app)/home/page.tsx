@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { AppShell } from "@/components/layout/app-shell"
 import { KpiCard } from "@/components/dashboard/kpi-card"
@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { useAuth } from "@/lib/auth-context"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -85,14 +86,65 @@ export default function HomePage() {
   }, [])
 
 
+  const { user } = useAuth()
+  const [officeId, setOfficeId] = useState<string>("")
 
+  useEffect(() => {
+    // 1) auth-context에 officeId가 있으면 바로 사용
+    if (user?.officeId) {
+      setOfficeId(user.officeId)
+      return
+    }
 
-  // Copy canonical attendance link
-  const handleCopyCheckinLink = () => {
-    const link = "https://desla.ai/attendance"
-    navigator.clipboard.writeText(link)
-    toast.success("출근 링크를 복사했습니다.")
+    // 2) 없으면 /api/auth/me로 보강 (세션 기반)
+    let ignore = false
+      ; (async () => {
+        try {
+          const res = await fetch("/api/auth/me", { cache: "no-store" })
+          if (!res.ok) return
+          const data = await res.json()
+          if (!ignore && data?.ok && data?.user?.officeId) {
+            setOfficeId(data.user.officeId)
+          }
+        } catch {
+          // 무시 (홈에서 강제 크래시 나면 안됨)
+        }
+      })()
+
+    return () => {
+      ignore = true
+    }
+  }, [user?.officeId])
+
+  const kioskLink = useMemo(() => {
+    const origin = typeof window !== "undefined" ? window.location.origin : ""
+    if (!origin || !officeId) return ""
+    return `${origin}/attendance?officeId=${encodeURIComponent(officeId)}`
+  }, [officeId])
+
+  const handleCopyKioskLink = async () => {
+    if (!kioskLink) {
+      toast.error("오피스 정보를 불러오는 중입니다. 잠시 후 다시 시도해주세요.")
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(kioskLink)
+      toast.success("출근(키오스크) 링크를 복사했습니다.")
+    } catch (e) {
+      console.error(e)
+      toast.error("링크 복사에 실패했습니다.")
+    }
   }
+
+  const handleOpenKiosk = () => {
+    if (!kioskLink) {
+      toast.error("오피스 정보를 불러오는 중입니다. 잠시 후 다시 시도해주세요.")
+      return
+    }
+    window.open(kioskLink, "_blank", "noopener,noreferrer")
+  }
+
+
 
   const handleNavigateToSite = (siteId: string) => {
     setSelectedSiteId(siteId)
@@ -177,7 +229,7 @@ export default function HomePage() {
             <p className="text-sm text-muted-foreground">{formatSimpleDate(today)}</p>
           </div>
           <div className="flex items-center gap-3">
-            <Button variant="outline" onClick={handleCopyCheckinLink} className="bg-transparent">
+            <Button variant="outline" onClick={handleCopyKioskLink} className="bg-transparent">
               <Link2 className="mr-2 h-4 w-4" />
               출근 링크 복사
             </Button>
