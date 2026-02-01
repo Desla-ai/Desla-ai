@@ -1,8 +1,7 @@
 "use client"
 
-import { useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 
-import { useState } from "react"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -41,7 +40,7 @@ interface SiteListPanelProps {
   checkedSiteIds: string[]
   onCheckedSiteIdsChange: (ids: string[]) => void
   onAddSite?: (site: Omit<Site, "id"> & { companyId: string }) => void
-  onAddWorker?: () => void // Declare the onAddWorker variable
+  onAddWorker?: () => void
 }
 
 const statusFilters = ["미진행", "배차대기", "배차완료", "금액확정"] as const
@@ -54,13 +53,45 @@ const statusColors: Record<StatusType, string> = {
   금액확정: "bg-status-pending text-status-pending-foreground",
 }
 
-// SMS Template system
-const smsTemplates = [
-  { id: "default", name: "기본 템플릿", content: "내일 {출근시간}까지 {현장명}({주소})로 출근 부탁드립니다. 문의: {사무소번호}" },
-  { id: "notice", name: "공지", content: "[공지] {현장명} 현장 안내드립니다.\n위치: {주소}\n출근시간: {출근시간}\n문의: {사무소번호}" },
-  { id: "urgent", name: "긴급", content: "[긴급] {현장명} 현장 긴급 인력 요청\n출근시간: {출근시간}\n위치: {주소}\n연락처: {사무소번호}" },
-  { id: "change", name: "현장 변경", content: "[현장변경] 내일 출근 현장이 변경되었습니다.\n변경현장: {현장명}\n주소: {주소}\n출근시간: {출근시간}\n문의: {사무소번호}" },
+// ✅ 템플릿 ID는 고정 키로 운영(office_id + id 복합키로 DB 저장하기 좋음)
+type SmsTemplateId = "default" | "notice" | "urgent" | "change"
+type SmsTemplate = { id: SmsTemplateId; name: string; content: string }
+
+// ✅ fallback(서버 로드 실패 시 사용)
+const fallbackSmsTemplates: SmsTemplate[] = [
+  {
+    id: "default",
+    name: "기본 템플릿",
+    content: "내일 {출근시간}까지 {현장명}({주소})로 출근 부탁드립니다. 문의: {사무소번호}",
+  },
+  {
+    id: "notice",
+    name: "공지",
+    content:
+      "[공지] {현장명} 현장 안내드립니다.\n위치: {주소}\n출근시간: {출근시간}\n문의: {사무소번호}",
+  },
+  {
+    id: "urgent",
+    name: "긴급",
+    content:
+      "[긴급] {현장명} 현장 긴급 인력 요청\n출근시간: {출근시간}\n위치: {주소}\n연락처: {사무소번호}",
+  },
+  {
+    id: "change",
+    name: "현장 변경",
+    content:
+      "[현장변경] 내일 출근 현장이 변경되었습니다.\n변경현장: {현장명}\n주소: {주소}\n출근시간: {출근시간}\n문의: {사무소번호}",
+  },
 ]
+
+function getSafeSelectedTemplateId(
+  templates: SmsTemplate[],
+  selected: SmsTemplateId | null | undefined
+): SmsTemplateId {
+  if (selected && templates.some((t) => t.id === selected)) return selected
+  // fallback은 항상 4종이 있으니 여기서 안전하게 결정 가능
+  return (templates[0]?.id ?? "default") as SmsTemplateId
+}
 
 export function SiteListPanel({
   sites,
@@ -74,10 +105,17 @@ export function SiteListPanel({
 }: SiteListPanelProps) {
   const [search, setSearch] = useState("")
   const [activeFilter, setActiveFilter] = useState<StatusType | null>(null)
+
+  // SMS dialog
   const [smsDialogOpen, setSmsDialogOpen] = useState(false)
-  const [selectedTemplate, setSelectedTemplate] = useState("default")
+  const [selectedTemplate, setSelectedTemplate] = useState<SmsTemplateId>("default")
   const [smsMessage, setSmsMessage] = useState("")
-  const [customTemplates, setCustomTemplates] = useState(smsTemplates)
+  const [isSendingSms, setIsSendingSms] = useState(false)
+
+  // ✅ templates are now backed by DB (fallback if not available)
+  const [templates, setTemplates] = useState<SmsTemplate[]>(fallbackSmsTemplates)
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false)
+  const [isSavingTemplate, setIsSavingTemplate] = useState(false)
 
   // New Site Dialog with full fields
   const [newSiteDialogOpen, setNewSiteDialogOpen] = useState(false)
@@ -102,6 +140,8 @@ export function SiteListPanel({
     return matchesSearch && matchesFilter
   })
 
+  const checkedSites = sites.filter((site) => checkedSiteIds.includes(site.id))
+
   const handleCheckboxChange = (siteId: string, checked: boolean) => {
     if (checked) {
       onCheckedSiteIdsChange([...checkedSiteIds, siteId])
@@ -110,65 +150,137 @@ export function SiteListPanel({
     }
   }
 
-  const getAssignedCountForSite = (siteId: string) => {
-    // Worker 필드명은 camel/snake 혼용 가능성이 있어 둘 다 대응
-    return workers.filter((w) => {
-      const assigned = (w as any).assignedSiteId ?? (w as any).assigned_site_id ?? null
-      const isFixed = (w as any).isFixed ?? (w as any).is_fixed ?? false
-      return assigned === siteId && Boolean(isFixed) !== undefined // 단순 안전장치
-    }).length
-  }
-
-
   const handleClearSelection = () => {
     onCheckedSiteIdsChange([])
+  }
+
+  const getAssignedCountForSite = (siteId: string) => {
+    return workers.filter((w) => {
+      const assigned = (w as any).assignedSiteId ?? (w as any).assigned_site_id ?? null
+      return assigned === siteId
+    }).length
   }
 
   const generateMessage = (template: string, site: Site) => {
     return template
       .replace("{현장명}", site.name)
       .replace("{주소}", site.address)
-      .replace("{출근시간}", site.checkInTime)
-      .replace("{사무소번호}", formatPhone(site.officePhone))
+      .replace("{출근시간}", (site as any).checkInTime ?? (site as any).check_in_time ?? "")
+      .replace(
+        "{사무소번호}",
+        formatPhone((site as any).officePhone ?? (site as any).office_phone ?? "")
+      )
   }
+
+  // -----------------------------
+  // ✅ Load templates from DB
+  // -----------------------------
+  const loadTemplates = async () => {
+    setIsLoadingTemplates(true)
+    try {
+      const res = await fetch("/api/settings/sms-templates", { method: "GET", cache: "no-store" })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast.error(json?.error ?? `SMS 템플릿을 불러오지 못했습니다 (${res.status})`)
+        return
+      }
+
+      const list = Array.isArray(json?.templates) ? (json.templates as SmsTemplate[]) : []
+
+      // ✅ 서버에 아무 것도 없으면 fallback 유지
+      if (list.length > 0) {
+        setTemplates(list)
+
+        // ✅ [핵심] 드롭다운 공백 방지: 현재 선택값이 서버 목록에 없으면 보정
+        setSelectedTemplate((prev) => getSafeSelectedTemplateId(list, prev))
+      } else {
+        // 서버가 빈 배열이면 fallback 유지 + 선택값도 fallback 기준으로 보정
+        setSelectedTemplate((prev) => getSafeSelectedTemplateId(fallbackSmsTemplates, prev))
+      }
+    } catch (e) {
+      console.error(e)
+      toast.error("SMS 템플릿 로드 중 오류가 발생했습니다")
+    } finally {
+      setIsLoadingTemplates(false)
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      if (cancelled) return
+      await loadTemplates()
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleOpenSmsDialog = () => {
     if (checkedSiteIds.length === 0) return
-    const firstSite = sites.find((s) => checkedSiteIds.includes(s.id))
-    const template = customTemplates.find((t) => t.id === selectedTemplate)
+
+    // ✅ [핵심] Dialog 열 때도 항상 유효한 template + message가 세팅되도록 보정
+    const safeId = getSafeSelectedTemplateId(templates, selectedTemplate)
+    if (safeId !== selectedTemplate) setSelectedTemplate(safeId)
+
+    const template = templates.find((t) => t.id === safeId) ?? templates[0]
     if (template) {
-      // ✅ 토큰 템플릿 원본을 그대로 편집창에 넣는다
-      setSmsMessage(template.content)
+      setSmsMessage(template.content) // ✅ 토큰 템플릿 원본 유지(초기 공백 방지)
     }
 
     setSmsDialogOpen(true)
   }
 
-  const handleTemplateChange = (templateId: string) => {
-    setSelectedTemplate(templateId)
-    const template = customTemplates.find((t) => t.id === templateId)
-    const firstSite = sites.find((s) => checkedSiteIds.includes(s.id))
-    if (template) {
-      // ✅ 토큰 템플릿 원본 유지
-      setSmsMessage(template.content)
+  const handleTemplateChange = (templateId: SmsTemplateId) => {
+    const safeId = getSafeSelectedTemplateId(templates, templateId)
+    setSelectedTemplate(safeId)
+
+    const template = templates.find((t) => t.id === safeId)
+    if (template) setSmsMessage(template.content) // ✅ 토큰 템플릿 원본 유지
+  }
+
+  const handleSaveTemplate = async () => {
+    const safeId = getSafeSelectedTemplateId(templates, selectedTemplate)
+    const t = templates.find((x) => x.id === safeId)
+    if (!t) return
+
+    setIsSavingTemplate(true)
+    try {
+      const res = await fetch("/api/settings/sms-templates", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: t.id,
+          name: t.name,
+          content: smsMessage,
+        }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast.error(json?.error ?? `템플릿 저장 실패 (${res.status})`)
+        return
+      }
+
+      const saved = (json?.template ?? { ...t, content: smsMessage }) as SmsTemplate
+      setTemplates((prev) => prev.map((x) => (x.id === saved.id ? saved : x)))
+      toast.success("템플릿이 저장되었습니다")
+    } catch (e) {
+      console.error(e)
+      toast.error("템플릿 저장 중 오류가 발생했습니다")
+    } finally {
+      setIsSavingTemplate(false)
     }
   }
 
-  const handleSaveTemplate = () => {
-    setCustomTemplates((prev) =>
-      prev.map((t) => (t.id === selectedTemplate ? { ...t, content: smsMessage } : t))
-    )
-    toast.success("템플릿이 저장되었습니다")
-  }
-
-  // Per-site SMS sending with template
-  const [isSendingSms, setIsSendingSms] = useState(false)
-  const [showPerSitePreview, setShowPerSitePreview] = useState(false)
-
-  // Generate preview data for each site
+  // -----------------------------
+  // Preview per site
+  // -----------------------------
   const perSitePreviewData = useMemo(() => {
-    const template = customTemplates.find((t) => t.id === selectedTemplate)
+    const safeId = getSafeSelectedTemplateId(templates, selectedTemplate)
+    const template = templates.find((t) => t.id === safeId)
     if (!template) return []
+
     return checkedSiteIds.map((siteId) => {
       const site = sites.find((s) => s.id === siteId)
       if (!site) return { siteId: "", siteName: "", message: "", recipientCount: 0 }
@@ -176,10 +288,10 @@ export function SiteListPanel({
         siteId: site.id,
         siteName: site.name,
         message: generateMessage(smsMessage || template.content, site),
-        recipientCount: getAssignedCountForSite(site.id), // ✅ 실제 배치 인원
+        recipientCount: getAssignedCountForSite(site.id),
       }
     })
-  }, [checkedSiteIds, customTemplates, selectedTemplate, sites, workers])
+  }, [checkedSiteIds, templates, selectedTemplate, sites, workers, smsMessage])
 
   const handleSendSms = async () => {
     if (checkedSiteIds.length === 0) return
@@ -196,15 +308,13 @@ export function SiteListPanel({
         body: JSON.stringify({
           mode: "bySiteWorkers",
           siteIds: checkedSiteIds,
-          template: smsMessage, // ✅ 한 템플릿(현장정보 치환)
-          // type: "SMS", // 필요하면 고정. 생략하면 서버가 길이로 SMS/LMS 판단하도록 둘 수도 있음
+          template: smsMessage, // ✅ 토큰 템플릿 원본 전송(서버가 site별로 치환)
         }),
       })
 
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data?.error ?? "문자 발송 실패")
 
-      // 서버가 요약 통계를 내려주도록 구현했을 때: {sent, failed, totalTargets, skippedNoPhone...}
       const sent = Number(data?.sent ?? 0)
       const failed = Number(data?.failed ?? 0)
       const totalTargets = Number(data?.totalTargets ?? 0)
@@ -216,7 +326,6 @@ export function SiteListPanel({
 
       setSmsDialogOpen(false)
       setSmsMessage("")
-      setShowPerSitePreview(false)
       onCheckedSiteIdsChange([])
     } catch (e: any) {
       toast.error(e?.message ?? "문자 발송에 실패했습니다. 다시 시도해주세요.")
@@ -224,7 +333,6 @@ export function SiteListPanel({
       setIsSendingSms(false)
     }
   }
-
 
   const handleAddNewSite = () => {
     if (!newSiteCompanyId) {
@@ -250,15 +358,16 @@ export function SiteListPanel({
       startDate: newSiteStartDate,
       endDate: newSiteEndDate,
       status: newSiteStatus,
-      plannedWorkers: plannedWorkers,
+      plannedWorkers,
       assignedWorkers: 0,
       todayRequired: plannedWorkers,
       progress: 0,
-      companyId: newSiteCompanyId, // ✅ 추가
+      companyId: newSiteCompanyId,
     })
+
     toast.success("새 현장이 등록되었습니다")
     setNewSiteDialogOpen(false)
-    // Reset form
+
     setNewSiteName("")
     setNewSiteAddress("")
     setNewSitePhone("")
@@ -272,8 +381,6 @@ export function SiteListPanel({
     setNewSiteCompanyBizNo("")
   }
 
-  const checkedSites = sites.filter((site) => checkedSiteIds.includes(site.id))
-
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <div className="shrink-0 border-b border-border p-4">
@@ -281,13 +388,8 @@ export function SiteListPanel({
           <h2 className="text-lg font-semibold">현장</h2>
         </div>
 
-        {/* Action Button - Site registration only */}
         <div className="mb-4">
-          <Button
-            size="sm"
-            onClick={() => setNewSiteDialogOpen(true)}
-            className="w-full"
-          >
+          <Button size="sm" onClick={() => setNewSiteDialogOpen(true)} className="w-full">
             <Building2 className="mr-1.5 h-4 w-4" />
             신규 현장 등록
           </Button>
@@ -302,6 +404,7 @@ export function SiteListPanel({
             className="pl-9"
           />
         </div>
+
         <div className="flex flex-wrap gap-2">
           {statusFilters.map((filter) => (
             <Badge
@@ -354,7 +457,7 @@ export function SiteListPanel({
         </div>
       </div>
 
-      {/* Site List - with proper overflow handling */}
+      {/* Site List */}
       <ScrollArea className="flex-1 min-h-0">
         <div className="flex flex-col gap-2 p-4">
           {filteredSites.length === 0 ? (
@@ -375,9 +478,7 @@ export function SiteListPanel({
                   <Checkbox
                     id={`site-checkbox-${site.id}`}
                     checked={isChecked}
-                    onCheckedChange={(checked) =>
-                      handleCheckboxChange(site.id, checked as boolean)
-                    }
+                    onCheckedChange={(checked) => handleCheckboxChange(site.id, checked as boolean)}
                     onClick={(e) => e.stopPropagation()}
                     className="mt-1 shrink-0"
                     aria-label={`${site.name} 선택`}
@@ -388,7 +489,9 @@ export function SiteListPanel({
                     className="flex flex-1 flex-col gap-2 text-left min-w-0"
                   >
                     <div className="flex items-start justify-between gap-2 min-w-0">
-                      <span className="font-medium min-w-0 whitespace-normal break-words leading-snug">{site.name}</span>
+                      <span className="font-medium min-w-0 whitespace-normal break-words leading-snug">
+                        {site.name}
+                      </span>
                       <Badge className={cn("shrink-0 text-xs", statusColors[site.status])}>
                         {site.status}
                       </Badge>
@@ -407,7 +510,7 @@ export function SiteListPanel({
         </div>
       </ScrollArea>
 
-      {/* SMS Dialog with Per-Site Template System */}
+      {/* SMS Dialog */}
       <Dialog open={smsDialogOpen} onOpenChange={setSmsDialogOpen}>
         <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader>
@@ -418,17 +521,22 @@ export function SiteListPanel({
                 : "선택한 현장의 작업자들에게 문자를 발송합니다."}
             </DialogDescription>
           </DialogHeader>
+
           <div className="flex flex-col gap-4 py-4">
             <div>
               {checkedSites.length > 1 ? (
                 <>
-                  <p className="mb-2 text-sm font-medium">현장별 발송 미리보기 ({checkedSites.length}개 현장)</p>
+                  <p className="mb-2 text-sm font-medium">
+                    현장별 발송 미리보기 ({checkedSites.length}개 현장)
+                  </p>
                   <div className="max-h-[200px] overflow-y-auto space-y-2 border border-border rounded-lg p-2">
                     {perSitePreviewData.map((preview) => (
                       <div key={preview.siteId} className="bg-muted/50 rounded-md p-3 space-y-1">
                         <div className="flex items-center justify-between">
                           <span className="font-medium text-sm">{preview.siteName}</span>
-                          <Badge variant="outline" className="text-xs">{preview.recipientCount}명</Badge>
+                          <Badge variant="outline" className="text-xs">
+                            {preview.recipientCount}명
+                          </Badge>
                         </div>
                         <p className="text-xs text-muted-foreground line-clamp-2">
                           {preview.message}
@@ -455,18 +563,36 @@ export function SiteListPanel({
               <Label htmlFor="template-select" className="mb-2 block text-sm font-medium">
                 템플릿 선택
               </Label>
-              <Select value={selectedTemplate} onValueChange={handleTemplateChange}>
+              <Select
+                value={getSafeSelectedTemplateId(templates, selectedTemplate)}
+                onValueChange={(v) => handleTemplateChange(v as SmsTemplateId)}
+              >
                 <SelectTrigger id="template-select">
-                  <SelectValue placeholder="템플릿 선택" />
+                  <SelectValue placeholder={isLoadingTemplates ? "불러오는 중..." : "템플릿 선택"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {customTemplates.map((template) => (
+                  {templates.map((template) => (
                     <SelectItem key={template.id} value={template.id}>
                       {template.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+
+              <div className="mt-2 flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={loadTemplates}
+                  disabled={isLoadingTemplates}
+                  className="h-8"
+                >
+                  {isLoadingTemplates ? "불러오는 중..." : "서버 템플릿 다시 불러오기"}
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  * 설정에서 저장한 템플릿이 여기에도 반영됩니다.
+                </span>
+              </div>
             </div>
 
             <div>
@@ -478,12 +604,14 @@ export function SiteListPanel({
                   variant="ghost"
                   size="sm"
                   onClick={handleSaveTemplate}
+                  disabled={isSavingTemplate}
                   className="h-7 px-2 text-xs"
                 >
                   <Save className="mr-1 h-3 w-3" />
-                  템플릿 저장
+                  {isSavingTemplate ? "저장 중..." : "템플릿 저장"}
                 </Button>
               </div>
+
               <Textarea
                 id="sms-message"
                 placeholder="발송할 메시지 내용을 입력하세요..."
@@ -496,6 +624,7 @@ export function SiteListPanel({
               </p>
             </div>
           </div>
+
           <DialogFooter className="gap-2 sm:gap-0">
             <Button variant="outline" onClick={() => setSmsDialogOpen(false)}>
               취소
@@ -507,13 +636,14 @@ export function SiteListPanel({
         </DialogContent>
       </Dialog>
 
-      {/* New Site Dialog - with Date Range */}
+      {/* New Site Dialog */}
       <Dialog open={newSiteDialogOpen} onOpenChange={setNewSiteDialogOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>신규 현장 등록</DialogTitle>
             <DialogDescription>새로운 현장 정보를 입력하세요.</DialogDescription>
           </DialogHeader>
+
           <div className="flex flex-col gap-4 py-4 max-h-[60vh] overflow-y-auto">
             <div>
               <Label htmlFor="site-name">현장명 *</Label>
@@ -525,6 +655,7 @@ export function SiteListPanel({
                 className="mt-1.5"
               />
             </div>
+
             <div>
               <Label htmlFor="site-address">주소 *</Label>
               <Input
@@ -535,16 +666,13 @@ export function SiteListPanel({
                 className="mt-1.5"
               />
             </div>
-            {/* Company Picker (required) */}
+
+            {/* Company Picker */}
             <div>
               <Label>건설사(업체) *</Label>
 
               <div className="mt-1.5 flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setCompanyPickerOpen(true)}
-                >
+                <Button type="button" variant="secondary" onClick={() => setCompanyPickerOpen(true)}>
                   {newSiteCompanyId ? "회사 변경" : "회사 선택"}
                 </Button>
 
@@ -649,6 +777,7 @@ export function SiteListPanel({
               </div>
             </div>
           </div>
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setNewSiteDialogOpen(false)}>
               취소

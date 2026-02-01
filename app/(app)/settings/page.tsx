@@ -65,6 +65,25 @@ type OfficeProfileForm = {
   bankHolder: string
 }
 
+type UserProfileForm = {
+  name: string
+  email: string
+  phone: string
+}
+
+type OfficePrefs = {
+  notifyCheckIn: boolean
+  notifyBilling: boolean
+  notifyIssues: boolean
+  autoLogout: boolean
+  autoRefresh: boolean
+}
+
+type SmsTemplateId = "default" | "notice" | "urgent" | "change"
+type SmsTemplateRow = { id: SmsTemplateId; name: string; content: string }
+
+const SMS_TOKENS_KO = ["{현장명}", "{주소}", "{출근시간}", "{사무소번호}"] as const
+
 function coerceSnapshots(value: unknown): AppSnapshot[] {
   if (Array.isArray(value)) return value as AppSnapshot[]
   if (value && typeof value === "object" && Array.isArray((value as any).snapshots)) {
@@ -88,21 +107,109 @@ function emptyOfficeProfile(): OfficeProfileForm {
   }
 }
 
+function emptyUserProfile(): UserProfileForm {
+  return { name: "", email: "", phone: "" }
+}
+
+const FALLBACK_SMS_TEMPLATES: SmsTemplateRow[] = [
+  { id: "default", name: "기본 템플릿", content: "내일 {출근시간}까지 {현장명}({주소})로 출근 부탁드립니다. 문의: {사무소번호}" },
+  { id: "notice", name: "공지", content: "[공지] {현장명} 현장 안내드립니다.\n위치: {주소}\n출근시간: {출근시간}\n문의: {사무소번호}" },
+  { id: "urgent", name: "긴급", content: "[긴급] {현장명} 현장 긴급 인력 요청\n출근시간: {출근시간}\n위치: {주소}\n연락처: {사무소번호}" },
+  { id: "change", name: "현장 변경", content: "[현장변경] 내일 출근 현장이 변경되었습니다.\n변경현장: {현장명}\n주소: {주소}\n출근시간: {출근시간}\n문의: {사무소번호}" },
+]
+
+
 export default function SettingsPage() {
   const {
     state,
-    updateSmsTemplate,
     saveSnapshot,
     loadSnapshot,
     getSnapshots,
     deleteSnapshot,
   } = useAppStore()
 
+  // -------------------------
   // SMS Template editing
-  const [editingTemplate, setEditingTemplate] = useState<string | null>(null)
+  // -------------------------
+  const [editingTemplate, setEditingTemplate] = useState<SmsTemplateId | null>(null)
   const [editTemplateContent, setEditTemplateContent] = useState("")
+  const [isLoadingSmsTemplates, setIsLoadingSmsTemplates] = useState(false)
+  const [isSavingSmsTemplate, setIsSavingSmsTemplate] = useState(false)
 
+  const [smsTemplates, setSmsTemplates] = useState<SmsTemplateRow[]>(FALLBACK_SMS_TEMPLATES)
+
+  const handleEditTemplate = (templateId: SmsTemplateId) => {
+    const template = smsTemplates.find((t) => t.id === templateId)
+    if (template) {
+      setEditingTemplate(templateId)
+      setEditTemplateContent(String(template.content ?? ""))
+    }
+  }
+
+
+  const loadSmsTemplatesFromDb = async () => {
+    setIsLoadingSmsTemplates(true)
+    try {
+      const res = await fetch("/api/settings/sms-templates", { method: "GET", cache: "no-store" })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast.error(json?.error ?? `SMS 템플릿을 불러오지 못했습니다 (${res.status})`)
+        return
+      }
+
+      const rows: SmsTemplateRow[] = Array.isArray(json?.templates) ? json.templates : []
+      if (rows.length > 0) setSmsTemplates(rows)
+      else setSmsTemplates(FALLBACK_SMS_TEMPLATES)
+    } finally {
+      setIsLoadingSmsTemplates(false)
+    }
+  }
+
+
+  const handleSaveTemplate = async () => {
+    if (!editingTemplate) return
+    const template = smsTemplates.find((t) => t.id === editingTemplate)
+    if (!template) return
+
+    setIsSavingSmsTemplate(true)
+    try {
+      const payload: SmsTemplateRow = {
+        id: template.id,
+        name: template.name,
+        content: editTemplateContent,
+      }
+
+      const res = await fetch("/api/settings/sms-templates", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast.error(json?.error ?? `SMS 템플릿 저장 실패 (${res.status})`)
+        return
+      }
+
+      const saved: SmsTemplateRow = (json?.template ?? payload) as SmsTemplateRow
+
+      // ✅ 로컬 state 갱신(이 화면의 Single Source of Truth)
+      setSmsTemplates((prev) => prev.map((t) => (t.id === saved.id ? saved : t)))
+
+      toast.success("SMS 템플릿이 저장되었습니다")
+      setEditingTemplate(null)
+      setEditTemplateContent("")
+    } catch (e) {
+      console.error(e)
+      toast.error("SMS 템플릿 저장 중 오류가 발생했습니다")
+    } finally {
+      setIsSavingSmsTemplate(false)
+    }
+  }
+
+
+  // -------------------------
   // Snapshot management
+  // -------------------------
   const [snapshots, setSnapshots] = useState<AppSnapshot[]>(() => coerceSnapshots(getSnapshots()))
   const [newSnapshotTitle, setNewSnapshotTitle] = useState("")
   const [saveSnapshotDialogOpen, setSaveSnapshotDialogOpen] = useState(false)
@@ -110,45 +217,12 @@ export default function SettingsPage() {
   const [selectedSnapshot, setSelectedSnapshot] = useState<AppSnapshot | null>(null)
   const [deleteSnapshotId, setDeleteSnapshotId] = useState<string | null>(null)
 
-  // Invite code UI state
-  const [inviteCode, setInviteCode] = useState<string>("")
-  const [inviteExpiresAt, setInviteExpiresAt] = useState<string>("")
-  const [isIssuingInvite, setIsIssuingInvite] = useState(false)
-
-  // ✅ Office profile (company/supplier) form state
-  const [officeProfile, setOfficeProfile] = useState<OfficeProfileForm>(() => emptyOfficeProfile())
-  const [isLoadingOfficeProfile, setIsLoadingOfficeProfile] = useState(false)
-  const [isSavingOfficeProfile, setIsSavingOfficeProfile] = useState(false)
-
   const totalWorkersInSnapshot = useMemo(() => {
     return snapshots.reduce(
       (acc, s) => acc + (s?.metrics?.waitingWorkers ?? 0) + (s?.metrics?.assignedWorkers ?? 0),
       0
     )
   }, [snapshots])
-
-  const handleSave = () => {
-    toast.success("설정이 저장되었습니다")
-  }
-
-  const handleEditTemplate = (templateId: string) => {
-    const template = state.smsTemplates.find((t) => t.id === templateId)
-    if (template) {
-      setEditingTemplate(templateId)
-      setEditTemplateContent(template.content)
-    }
-  }
-
-  const handleSaveTemplate = () => {
-    if (!editingTemplate) return
-    const template = state.smsTemplates.find((t) => t.id === editingTemplate)
-    if (template) {
-      updateSmsTemplate({ ...template, content: editTemplateContent })
-      toast.success("SMS 템플릿이 저장되었습니다")
-    }
-    setEditingTemplate(null)
-    setEditTemplateContent("")
-  }
 
   const refreshSnapshots = async () => {
     try {
@@ -161,7 +235,98 @@ export default function SettingsPage() {
     }
   }
 
-  // ✅ load office profile
+  const handleSaveSnapshot = async () => {
+    if (!newSnapshotTitle.trim()) {
+      toast.error("스냅샷 이름을 입력해주세요")
+      return
+    }
+    try {
+      const snapshot = await Promise.resolve(saveSnapshot(newSnapshotTitle.trim()) as any)
+      await refreshSnapshots()
+      setSaveSnapshotDialogOpen(false)
+      setNewSnapshotTitle("")
+      toast.success(`"${snapshot?.title ?? "스냅샷"}" 스냅샷이 저장되었습니다`)
+    } catch (e) {
+      console.error(e)
+      toast.error("스냅샷 저장에 실패했습니다")
+    }
+  }
+
+  const handleLoadSnapshot = async () => {
+    if (!selectedSnapshot) return
+    try {
+      await Promise.resolve(loadSnapshot(selectedSnapshot) as any)
+      setLoadSnapshotDialogOpen(false)
+      setSelectedSnapshot(null)
+      toast.success(`"${selectedSnapshot.title}" 스냅샷을 불러왔습니다`)
+    } catch (e) {
+      console.error(e)
+      toast.error("스냅샷 불러오기에 실패했습니다")
+    }
+  }
+
+  const handleDeleteSnapshot = async () => {
+    if (!deleteSnapshotId) return
+    try {
+      await Promise.resolve(deleteSnapshot(deleteSnapshotId) as any)
+      await refreshSnapshots()
+      setDeleteSnapshotId(null)
+      toast.success("스냅샷이 삭제되었습니다")
+    } catch (e) {
+      console.error(e)
+      toast.error("스냅샷 삭제에 실패했습니다")
+    }
+  }
+
+  // -------------------------
+  // Invite code
+  // -------------------------
+  const [inviteCode, setInviteCode] = useState<string>("")
+  const [inviteExpiresAt, setInviteExpiresAt] = useState<string>("")
+  const [isIssuingInvite, setIsIssuingInvite] = useState(false)
+
+  const handleIssueInviteCode = async () => {
+    setIsIssuingInvite(true)
+    try {
+      const res = await fetch("/api/admin/invitations", { method: "POST" })
+      const json = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        const msg =
+          json?.error ??
+          (res.status === 401 ? "로그인이 필요합니다" : `초대코드 발급 실패 (${res.status})`)
+        toast.error(msg)
+        return
+      }
+
+      setInviteCode(String(json.inviteCode ?? ""))
+      setInviteExpiresAt(String(json.expiresAt ?? ""))
+      toast.success("초대코드를 발급했습니다")
+    } catch (e) {
+      console.error(e)
+      toast.error("초대코드 발급 중 오류가 발생했습니다")
+    } finally {
+      setIsIssuingInvite(false)
+    }
+  }
+
+  const handleCopyInviteCode = async () => {
+    if (!inviteCode) return
+    try {
+      await navigator.clipboard.writeText(inviteCode)
+      toast.success("초대코드를 복사했습니다")
+    } catch {
+      toast.error("복사에 실패했습니다")
+    }
+  }
+
+  // -------------------------
+  // Office profile (supplier)
+  // -------------------------
+  const [officeProfile, setOfficeProfile] = useState<OfficeProfileForm>(() => emptyOfficeProfile())
+  const [isLoadingOfficeProfile, setIsLoadingOfficeProfile] = useState(false)
+  const [isSavingOfficeProfile, setIsSavingOfficeProfile] = useState(false)
+
   const loadOfficeProfile = async () => {
     setIsLoadingOfficeProfile(true)
     try {
@@ -212,7 +377,6 @@ export default function SettingsPage() {
       }
 
       toast.success("회사 정보가 저장되었습니다")
-      // 서버 값으로 다시 동기화(공백 트림 등)
       const p = json?.officeProfile ?? {}
       setOfficeProfile({
         supplierName: String(p.supplierName ?? ""),
@@ -234,90 +398,127 @@ export default function SettingsPage() {
     }
   }
 
+  // -------------------------
+  // User profile (user_profiles)
+  // -------------------------
+  const [userProfile, setUserProfile] = useState<UserProfileForm>(() => emptyUserProfile())
+  const [isLoadingUserProfile, setIsLoadingUserProfile] = useState(false)
+  const [isSavingUserProfile, setIsSavingUserProfile] = useState(false)
+
+  const loadUserProfile = async () => {
+    setIsLoadingUserProfile(true)
+    try {
+      const res = await fetch("/api/settings/profile", { method: "GET" })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast.error(json?.error ?? `프로필을 불러오지 못했습니다 (${res.status})`)
+        return
+      }
+      const p = json?.profile ?? {}
+      setUserProfile({
+        name: String(p.name ?? ""),
+        email: String(p.email ?? ""),
+        phone: String(p.phone ?? ""),
+      })
+    } catch (e) {
+      console.error(e)
+      toast.error("프로필을 불러오는 중 오류가 발생했습니다")
+    } finally {
+      setIsLoadingUserProfile(false)
+    }
+  }
+
+  const saveUserProfile = async () => {
+    setIsSavingUserProfile(true)
+    try {
+      const res = await fetch("/api/settings/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(userProfile),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast.error(json?.error ?? `프로필 저장 실패 (${res.status})`)
+        return
+      }
+      const p = json?.profile ?? {}
+      setUserProfile({
+        name: String(p.name ?? ""),
+        email: String(p.email ?? ""),
+        phone: String(p.phone ?? ""),
+      })
+      toast.success("프로필이 저장되었습니다")
+    } catch (e) {
+      console.error(e)
+      toast.error("프로필 저장 중 오류가 발생했습니다")
+    } finally {
+      setIsSavingUserProfile(false)
+    }
+  }
+
+  // -------------------------
+  // Office prefs (office_prefs)
+  // -------------------------
+  const [prefs, setPrefs] = useState<OfficePrefs>({
+    notifyCheckIn: true,
+    notifyBilling: true,
+    notifyIssues: true,
+    autoLogout: true,
+    autoRefresh: true,
+  })
+  const [isLoadingPrefs, setIsLoadingPrefs] = useState(false)
+  const [isSavingPrefsKey, setIsSavingPrefsKey] = useState<string | null>(null)
+
+  const loadPrefs = async () => {
+    setIsLoadingPrefs(true)
+    try {
+      const res = await fetch("/api/settings/prefs", { method: "GET" })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast.error(json?.error ?? `설정을 불러오지 못했습니다 (${res.status})`)
+        return
+      }
+      const p = (json?.prefs ?? {}) as Partial<OfficePrefs>
+      setPrefs((prev) => ({ ...prev, ...p }))
+    } catch (e) {
+      console.error(e)
+      toast.error("설정을 불러오는 중 오류가 발생했습니다")
+    } finally {
+      setIsLoadingPrefs(false)
+    }
+  }
+
+  const savePrefsPartial = async (patch: Partial<OfficePrefs>, keyLabel: string) => {
+    setIsSavingPrefsKey(keyLabel)
+    try {
+      const res = await fetch("/api/settings/prefs", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast.error(json?.error ?? `설정 저장 실패 (${res.status})`)
+        return
+      }
+      const next = (json?.prefs ?? {}) as Partial<OfficePrefs>
+      setPrefs((prev) => ({ ...prev, ...next }))
+    } catch (e) {
+      console.error(e)
+      toast.error("설정 저장 중 오류가 발생했습니다")
+    } finally {
+      setIsSavingPrefsKey(null)
+    }
+  }
+
   useEffect(() => {
     void refreshSnapshots()
     void loadOfficeProfile()
+    void loadUserProfile()
+    void loadPrefs()
+    void loadSmsTemplatesFromDb()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  const handleSaveSnapshot = async () => {
-    if (!newSnapshotTitle.trim()) {
-      toast.error("스냅샷 이름을 입력해주세요")
-      return
-    }
-
-    try {
-      const snapshot = await Promise.resolve(saveSnapshot(newSnapshotTitle.trim()) as any)
-      await refreshSnapshots()
-      setSaveSnapshotDialogOpen(false)
-      setNewSnapshotTitle("")
-      toast.success(`"${snapshot?.title ?? "스냅샷"}" 스냅샷이 저장되었습니다`)
-    } catch (e) {
-      console.error(e)
-      toast.error("스냅샷 저장에 실패했습니다")
-    }
-  }
-
-  const handleLoadSnapshot = async () => {
-    if (!selectedSnapshot) return
-    try {
-      await Promise.resolve(loadSnapshot(selectedSnapshot) as any)
-      setLoadSnapshotDialogOpen(false)
-      setSelectedSnapshot(null)
-      toast.success(`"${selectedSnapshot.title}" 스냅샷을 불러왔습니다`)
-    } catch (e) {
-      console.error(e)
-      toast.error("스냅샷 불러오기에 실패했습니다")
-    }
-  }
-
-  const handleDeleteSnapshot = async () => {
-    if (!deleteSnapshotId) return
-    try {
-      await Promise.resolve(deleteSnapshot(deleteSnapshotId) as any)
-      await refreshSnapshots()
-      setDeleteSnapshotId(null)
-      toast.success("스냅샷이 삭제되었습니다")
-    } catch (e) {
-      console.error(e)
-      toast.error("스냅샷 삭제에 실패했습니다")
-    }
-  }
-
-  const handleIssueInviteCode = async () => {
-    setIsIssuingInvite(true)
-    try {
-      const res = await fetch("/api/admin/invitations", { method: "POST" })
-      const json = await res.json().catch(() => ({}))
-
-      if (!res.ok) {
-        const msg =
-          json?.error ??
-          (res.status === 401 ? "로그인이 필요합니다" : `초대코드 발급 실패 (${res.status})`)
-        toast.error(msg)
-        return
-      }
-
-      setInviteCode(String(json.inviteCode ?? ""))
-      setInviteExpiresAt(String(json.expiresAt ?? ""))
-      toast.success("초대코드를 발급했습니다")
-    } catch (e) {
-      console.error(e)
-      toast.error("초대코드 발급 중 오류가 발생했습니다")
-    } finally {
-      setIsIssuingInvite(false)
-    }
-  }
-
-  const handleCopyInviteCode = async () => {
-    if (!inviteCode) return
-    try {
-      await navigator.clipboard.writeText(inviteCode)
-      toast.success("초대코드를 복사했습니다")
-    } catch {
-      toast.error("복사에 실패했습니다")
-    }
-  }
 
   return (
     <AppShell title="설정">
@@ -354,38 +555,64 @@ export default function SettingsPage() {
 
               {/* Profile Tab */}
               <TabsContent value="profile" className="space-y-6">
-                {/* Card 1: Profile */}
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">프로필 설정</CardTitle>
-                    <CardDescription>계정 정보를 관리합니다</CardDescription>
+                    <CardDescription>이름/이메일/연락처를 저장합니다. (username과 별개)</CardDescription>
                   </CardHeader>
                   <CardContent className="flex flex-col gap-4">
+                    {isLoadingUserProfile ? (
+                      <div className="text-sm text-muted-foreground">불러오는 중...</div>
+                    ) : null}
+
                     <div className="grid gap-2">
                       <Label htmlFor="name">이름</Label>
-                      <Input id="name" defaultValue="관리자" className="max-w-md" />
+                      <Input
+                        id="name"
+                        value={userProfile.name}
+                        onChange={(e) => setUserProfile((p) => ({ ...p, name: e.target.value }))}
+                        className="max-w-md"
+                      />
                     </div>
+
                     <div className="grid gap-2">
                       <Label htmlFor="email">이메일</Label>
-                      <Input id="email" type="email" defaultValue="admin@desla.ai" className="max-w-md" />
+                      <Input
+                        id="email"
+                        type="email"
+                        value={userProfile.email}
+                        onChange={(e) => setUserProfile((p) => ({ ...p, email: e.target.value }))}
+                        className="max-w-md"
+                      />
                     </div>
+
                     <div className="grid gap-2">
                       <Label htmlFor="phone">연락처</Label>
-                      <Input id="phone" type="tel" defaultValue="010-1234-5678" className="max-w-md" />
+                      <Input
+                        id="phone"
+                        type="tel"
+                        value={userProfile.phone}
+                        onChange={(e) => setUserProfile((p) => ({ ...p, phone: e.target.value }))}
+                        className="max-w-md"
+                      />
                     </div>
-                    <div className="pt-2">
-                      <Button onClick={handleSave}>저장</Button>
+
+                    <div className="pt-2 flex items-center gap-2">
+                      <Button onClick={saveUserProfile} disabled={isSavingUserProfile}>
+                        {isSavingUserProfile ? "저장 중..." : "저장"}
+                      </Button>
+                      <Button variant="outline" onClick={loadUserProfile} disabled={isSavingUserProfile}>
+                        다시 불러오기
+                      </Button>
                     </div>
                   </CardContent>
                 </Card>
 
-                {/* Card 2: Company / Supplier info */}
+                {/* Company / Supplier info */}
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">회사 정보(공급자)</CardTitle>
-                    <CardDescription>
-                      노무비 청구서 PDF의 ‘공급자’ 영역에 표시됩니다.
-                    </CardDescription>
+                    <CardDescription>노무비 청구서 PDF의 ‘공급자’ 영역에 표시됩니다.</CardDescription>
                   </CardHeader>
 
                   <CardContent className="flex flex-col gap-4">
@@ -399,10 +626,7 @@ export default function SettingsPage() {
                         id="supplierName"
                         className="max-w-md"
                         value={officeProfile.supplierName}
-                        onChange={(e) =>
-                          setOfficeProfile((p) => ({ ...p, supplierName: e.target.value }))
-                        }
-                        placeholder="예: 대한인력"
+                        onChange={(e) => setOfficeProfile((p) => ({ ...p, supplierName: e.target.value }))}
                       />
                     </div>
 
@@ -412,10 +636,7 @@ export default function SettingsPage() {
                         id="bizNo"
                         className="max-w-md"
                         value={officeProfile.bizNo}
-                        onChange={(e) =>
-                          setOfficeProfile((p) => ({ ...p, bizNo: e.target.value }))
-                        }
-                        placeholder="예: 111-22-33333"
+                        onChange={(e) => setOfficeProfile((p) => ({ ...p, bizNo: e.target.value }))}
                       />
                     </div>
 
@@ -425,10 +646,7 @@ export default function SettingsPage() {
                         id="ceoName"
                         className="max-w-md"
                         value={officeProfile.ceoName}
-                        onChange={(e) =>
-                          setOfficeProfile((p) => ({ ...p, ceoName: e.target.value }))
-                        }
-                        placeholder="예: 홍길동"
+                        onChange={(e) => setOfficeProfile((p) => ({ ...p, ceoName: e.target.value }))}
                       />
                     </div>
 
@@ -438,10 +656,7 @@ export default function SettingsPage() {
                         id="address"
                         className="max-w-2xl"
                         value={officeProfile.address}
-                        onChange={(e) =>
-                          setOfficeProfile((p) => ({ ...p, address: e.target.value }))
-                        }
-                        placeholder="예: 서울시 ..."
+                        onChange={(e) => setOfficeProfile((p) => ({ ...p, address: e.target.value }))}
                       />
                     </div>
 
@@ -451,10 +666,7 @@ export default function SettingsPage() {
                         <Input
                           id="bizType"
                           value={officeProfile.bizType}
-                          onChange={(e) =>
-                            setOfficeProfile((p) => ({ ...p, bizType: e.target.value }))
-                          }
-                          placeholder="예: 서비스"
+                          onChange={(e) => setOfficeProfile((p) => ({ ...p, bizType: e.target.value }))}
                         />
                       </div>
                       <div className="grid gap-2">
@@ -462,10 +674,7 @@ export default function SettingsPage() {
                         <Input
                           id="bizItem"
                           value={officeProfile.bizItem}
-                          onChange={(e) =>
-                            setOfficeProfile((p) => ({ ...p, bizItem: e.target.value }))
-                          }
-                          placeholder="예: 잡역"
+                          onChange={(e) => setOfficeProfile((p) => ({ ...p, bizItem: e.target.value }))}
                         />
                       </div>
                     </div>
@@ -476,10 +685,7 @@ export default function SettingsPage() {
                         id="officePhone"
                         className="max-w-md"
                         value={officeProfile.phone}
-                        onChange={(e) =>
-                          setOfficeProfile((p) => ({ ...p, phone: e.target.value }))
-                        }
-                        placeholder="예: 02-123-4567 / 010-1234-5678"
+                        onChange={(e) => setOfficeProfile((p) => ({ ...p, phone: e.target.value }))}
                       />
                     </div>
 
@@ -491,10 +697,7 @@ export default function SettingsPage() {
                         <Input
                           id="bankName"
                           value={officeProfile.bankName}
-                          onChange={(e) =>
-                            setOfficeProfile((p) => ({ ...p, bankName: e.target.value }))
-                          }
-                          placeholder="예: 농협"
+                          onChange={(e) => setOfficeProfile((p) => ({ ...p, bankName: e.target.value }))}
                         />
                       </div>
                       <div className="grid gap-2 md:col-span-2">
@@ -502,10 +705,7 @@ export default function SettingsPage() {
                         <Input
                           id="bankAccount"
                           value={officeProfile.bankAccount}
-                          onChange={(e) =>
-                            setOfficeProfile((p) => ({ ...p, bankAccount: e.target.value }))
-                          }
-                          placeholder="예: 111-22-333"
+                          onChange={(e) => setOfficeProfile((p) => ({ ...p, bankAccount: e.target.value }))}
                         />
                       </div>
                     </div>
@@ -516,10 +716,7 @@ export default function SettingsPage() {
                         id="bankHolder"
                         className="max-w-md"
                         value={officeProfile.bankHolder}
-                        onChange={(e) =>
-                          setOfficeProfile((p) => ({ ...p, bankHolder: e.target.value }))
-                        }
-                        placeholder="예: 대한인력"
+                        onChange={(e) => setOfficeProfile((p) => ({ ...p, bankHolder: e.target.value }))}
                       />
                     </div>
 
@@ -546,31 +743,46 @@ export default function SettingsPage() {
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col gap-1">
                         <Label>출근 알림</Label>
-                        <span className="text-sm text-muted-foreground">
-                          근로자 출근 시 알림을 받습니다
-                        </span>
+                        <span className="text-sm text-muted-foreground">근로자 출근 시 알림을 받습니다</span>
                       </div>
-                      <Switch defaultChecked />
+                      <Switch
+                        checked={prefs.notifyCheckIn}
+                        disabled={isLoadingPrefs || isSavingPrefsKey === "notifyCheckIn"}
+                        onCheckedChange={(v) => {
+                          setPrefs((p) => ({ ...p, notifyCheckIn: v }))
+                          void savePrefsPartial({ notifyCheckIn: v }, "notifyCheckIn")
+                        }}
+                      />
                     </div>
                     <Separator />
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col gap-1">
                         <Label>청구 알림</Label>
-                        <span className="text-sm text-muted-foreground">
-                          청구서 상태 변경 시 알림을 받습니다
-                        </span>
+                        <span className="text-sm text-muted-foreground">청구서 상태 변경 시 알림을 받습니다</span>
                       </div>
-                      <Switch defaultChecked />
+                      <Switch
+                        checked={prefs.notifyBilling}
+                        disabled={isLoadingPrefs || isSavingPrefsKey === "notifyBilling"}
+                        onCheckedChange={(v) => {
+                          setPrefs((p) => ({ ...p, notifyBilling: v }))
+                          void savePrefsPartial({ notifyBilling: v }, "notifyBilling")
+                        }}
+                      />
                     </div>
                     <Separator />
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col gap-1">
                         <Label>이슈 알림</Label>
-                        <span className="text-sm text-muted-foreground">
-                          미해결 이슈 발생 시 알림을 받습니다
-                        </span>
+                        <span className="text-sm text-muted-foreground">미해결 이슈 발생 시 알림을 받습니다</span>
                       </div>
-                      <Switch defaultChecked />
+                      <Switch
+                        checked={prefs.notifyIssues}
+                        disabled={isLoadingPrefs || isSavingPrefsKey === "notifyIssues"}
+                        onCheckedChange={(v) => {
+                          setPrefs((p) => ({ ...p, notifyIssues: v }))
+                          void savePrefsPartial({ notifyIssues: v }, "notifyIssues")
+                        }}
+                      />
                     </div>
                   </CardContent>
                 </Card>
@@ -585,28 +797,49 @@ export default function SettingsPage() {
                       SMS 템플릿 관리
                     </CardTitle>
                     <CardDescription>
-                      인력에게 발송할 SMS 템플릿을 관리합니다. 변수:{" "}
-                      {"{siteName}"}, {"{date}"}, {"{checkInTime}"}, {"{address}"}, {"{officePhone}"}, {"{message}"}
+                      인력에게 발송할 템플릿을 관리합니다. 변수:{" "}
+                      {SMS_TOKENS_KO.map((t, i) => (
+                        <span key={t} className="font-mono">
+                          {t}
+                          {i < SMS_TOKENS_KO.length - 1 ? ", " : ""}
+                        </span>
+                      ))}
+                      {isLoadingSmsTemplates ? " (불러오는 중...)" : ""}
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="flex flex-col gap-4">
-                    {state.smsTemplates.map((template) => (
+                    {smsTemplates.map((template) => (
                       <div key={template.id} className="rounded-lg border border-border p-4">
-                        <div className="flex items-center justify-between mb-2">
+                        <div className="mb-2 flex items-center justify-between">
                           <div className="flex items-center gap-2">
                             <span className="font-medium">{template.name}</span>
-                            <Badge variant="outline">{template.type}</Badge>
+                            <Badge variant="outline">{template.id}</Badge>
                           </div>
-                          <Button variant="ghost" size="sm" onClick={() => handleEditTemplate(template.id)}>
-                            <Edit2 className="h-4 w-4 mr-1" />
+
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleEditTemplate(template.id)}
+                          >
+                            <Edit2 className="mr-1 h-4 w-4" />
                             수정
                           </Button>
                         </div>
-                        <pre className="text-sm text-muted-foreground whitespace-pre-wrap bg-muted/50 rounded p-3">
+
+                        <pre className="whitespace-pre-wrap rounded bg-muted/50 p-3 text-sm text-muted-foreground">
                           {template.content}
                         </pre>
                       </div>
                     ))}
+
+                    <div className="flex items-center gap-2">
+                      <Button variant="outline" onClick={loadSmsTemplatesFromDb} disabled={isLoadingSmsTemplates}>
+                        서버 템플릿 다시 불러오기
+                      </Button>
+                      <span className="text-xs text-muted-foreground">
+                        * 이제 “저장”은 DB(sms_templates)에 반영됩니다.
+                      </span>
+                    </div>
                   </CardContent>
                 </Card>
               </TabsContent>
@@ -644,7 +877,9 @@ export default function SettingsPage() {
                     {snapshots.length > 0 && (
                       <div className="rounded-lg border border-border">
                         <div className="p-3 border-b border-border bg-muted/30">
-                          <span className="text-sm font-medium">저장된 스냅샷 ({snapshots.length})</span>
+                          <span className="text-sm font-medium">
+                            저장된 스냅샷 ({snapshots.length}) · (표시 인력합: {totalWorkersInSnapshot}명)
+                          </span>
                         </div>
                         <ScrollArea className="max-h-[240px]">
                           {snapshots.map((snapshot) => (
@@ -657,7 +892,7 @@ export default function SettingsPage() {
                                 <span className="text-xs text-muted-foreground">
                                   {formatKoreanDate(snapshot.timestamp.split("T")[0])} • 현장{" "}
                                   {snapshot.metrics.siteCount}개 • 인력{" "}
-                                  {snapshot.metrics.waitingWorkers + snapshot.metrics.assignedWorkers}명
+                                  {(snapshot.metrics.waitingWorkers ?? 0) + (snapshot.metrics.assignedWorkers ?? 0)}명
                                 </span>
                               </div>
                               <div className="flex items-center gap-1">
@@ -732,9 +967,7 @@ export default function SettingsPage() {
                             <div className="text-sm font-medium">발급된 초대코드</div>
                             <div className="font-mono text-base">{inviteCode}</div>
                             {inviteExpiresAt ? (
-                              <div className="text-xs text-muted-foreground">
-                                만료: {inviteExpiresAt}
-                              </div>
+                              <div className="text-xs text-muted-foreground">만료: {inviteExpiresAt}</div>
                             ) : null}
                           </div>
                           <Badge variant="outline">24h</Badge>
@@ -757,21 +990,31 @@ export default function SettingsPage() {
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col gap-1">
                         <Label>자동 로그아웃</Label>
-                        <span className="text-sm text-muted-foreground">
-                          30분 동안 활동이 없으면 자동 로그아웃됩니다
-                        </span>
+                        <span className="text-sm text-muted-foreground">30분 동안 활동이 없으면 자동 로그아웃됩니다</span>
                       </div>
-                      <Switch defaultChecked />
+                      <Switch
+                        checked={prefs.autoLogout}
+                        disabled={isLoadingPrefs || isSavingPrefsKey === "autoLogout"}
+                        onCheckedChange={(v) => {
+                          setPrefs((p) => ({ ...p, autoLogout: v }))
+                          void savePrefsPartial({ autoLogout: v }, "autoLogout")
+                        }}
+                      />
                     </div>
                     <Separator />
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col gap-1">
                         <Label>데이터 자동 새로고침</Label>
-                        <span className="text-sm text-muted-foreground">
-                          5분마다 데이터를 자동으로 새로고침합니다
-                        </span>
+                        <span className="text-sm text-muted-foreground">5분마다 데이터를 자동으로 새로고침합니다</span>
                       </div>
-                      <Switch defaultChecked />
+                      <Switch
+                        checked={prefs.autoRefresh}
+                        disabled={isLoadingPrefs || isSavingPrefsKey === "autoRefresh"}
+                        onCheckedChange={(v) => {
+                          setPrefs((p) => ({ ...p, autoRefresh: v }))
+                          void savePrefsPartial({ autoRefresh: v }, "autoRefresh")
+                        }}
+                      />
                     </div>
                   </CardContent>
                 </Card>
@@ -787,18 +1030,22 @@ export default function SettingsPage() {
           <DialogHeader>
             <DialogTitle>SMS 템플릿 수정</DialogTitle>
             <DialogDescription>
-              템플릿 내용을 수정합니다. 변수를 사용하면 발송 시 자동으로 치환됩니다.
+              템플릿 내용을 수정합니다. 변수:{" "}
+              {SMS_TOKENS_KO.map((v) => (
+                <span key={v} className="font-mono ml-1">{v}</span>
+              ))}
             </DialogDescription>
           </DialogHeader>
+
           <div className="grid gap-4 py-4">
             <Textarea
               value={editTemplateContent}
               onChange={(e) => setEditTemplateContent(e.target.value)}
-              rows={6}
+              rows={8}
               className="font-mono text-sm"
             />
             <div className="flex flex-wrap gap-1">
-              {["{siteName}", "{date}", "{checkInTime}", "{address}", "{officePhone}", "{message}"].map((v) => (
+              {SMS_TOKENS_KO.map((v) => (
                 <Badge
                   key={v}
                   variant="outline"
@@ -810,11 +1057,14 @@ export default function SettingsPage() {
               ))}
             </div>
           </div>
+
           <DialogFooter>
-            <Button variant="outline" onClick={() => setEditingTemplate(null)}>
+            <Button variant="outline" onClick={() => setEditingTemplate(null)} disabled={isSavingSmsTemplate}>
               취소
             </Button>
-            <Button onClick={handleSaveTemplate}>저장</Button>
+            <Button onClick={handleSaveTemplate} disabled={isSavingSmsTemplate}>
+              {isSavingSmsTemplate ? "저장 중..." : "저장"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -824,9 +1074,7 @@ export default function SettingsPage() {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>현재 상태 저장</DialogTitle>
-            <DialogDescription>
-              현재 데이터를 스냅샷으로 저장합니다. 나중에 이 시점으로 복원할 수 있습니다.
-            </DialogDescription>
+            <DialogDescription>현재 데이터를 스냅샷으로 저장합니다. 나중에 이 시점으로 복원할 수 있습니다.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="grid gap-2">
@@ -848,9 +1096,7 @@ export default function SettingsPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setSaveSnapshotDialogOpen(false)}>
-              취소
-            </Button>
+            <Button variant="outline" onClick={() => setSaveSnapshotDialogOpen(false)}>취소</Button>
             <Button onClick={handleSaveSnapshot}>저장</Button>
           </DialogFooter>
         </DialogContent>
@@ -861,15 +1107,12 @@ export default function SettingsPage() {
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>스냅샷 불러오기</DialogTitle>
-            <DialogDescription>
-              선택한 스냅샷으로 데이터를 복원합니다. 현재 데이터는 덮어씌워집니다.
-            </DialogDescription>
+            <DialogDescription>선택한 스냅샷으로 데이터를 복원합니다. 현재 데이터는 덮어씌워집니다.</DialogDescription>
           </DialogHeader>
+
           <div className="py-4">
             {snapshots.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">
-                저장된 스냅샷이 없습니다
-              </div>
+              <div className="text-center py-8 text-muted-foreground">저장된 스냅샷이 없습니다</div>
             ) : (
               <ScrollArea className="max-h-[300px]">
                 <div className="space-y-2">
@@ -897,11 +1140,11 @@ export default function SettingsPage() {
                         </span>
                         <span className="flex items-center gap-1">
                           <Users className="h-3 w-3" />
-                          {snapshot.metrics.waitingWorkers + snapshot.metrics.assignedWorkers}명
+                          {(snapshot.metrics.waitingWorkers ?? 0) + (snapshot.metrics.assignedWorkers ?? 0)}명
                         </span>
                         <span className="flex items-center gap-1">
                           <Clock className="h-3 w-3" />
-                          대기 {snapshot.metrics.waitingWorkers}명
+                          대기 {snapshot.metrics.waitingWorkers ?? 0}명
                         </span>
                       </div>
                     </div>
@@ -910,13 +1153,10 @@ export default function SettingsPage() {
               </ScrollArea>
             )}
           </div>
+
           <DialogFooter>
-            <Button variant="outline" onClick={() => setLoadSnapshotDialogOpen(false)}>
-              취소
-            </Button>
-            <Button onClick={handleLoadSnapshot} disabled={!selectedSnapshot}>
-              불러오기
-            </Button>
+            <Button variant="outline" onClick={() => setLoadSnapshotDialogOpen(false)}>취소</Button>
+            <Button onClick={handleLoadSnapshot} disabled={!selectedSnapshot}>불러오기</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

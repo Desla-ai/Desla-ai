@@ -113,6 +113,47 @@ export async function POST(req: Request) {
         );
 
       if (profErr) throw profErr;
+
+      // ✅ [추가] 기본 SMS 템플릿 시드 (오피스 생성 시 자동 삽입)
+      // - sms_templates 스키마는 office_id(uuid), id(text), name(text), content(text), updated_at/created_at(timestamptz)
+      // - onConflict는 (office_id,id) 복합키/유니크가 있어야 동작
+      const defaultSmsTemplates = [
+        {
+          office_id: officeId,
+          id: "default",
+          name: "기본 템플릿",
+          content: "내일 {출근시간}까지 {현장명}({주소})로 출근 부탁드립니다. 문의: {사무소번호}",
+          updated_at: nowIso,
+        },
+        {
+          office_id: officeId,
+          id: "notice",
+          name: "공지",
+          content: "[공지] {현장명} 현장 안내드립니다.\n위치: {주소}\n출근시간: {출근시간}\n문의: {사무소번호}",
+          updated_at: nowIso,
+        },
+        {
+          office_id: officeId,
+          id: "urgent",
+          name: "긴급",
+          content: "[긴급] {현장명} 현장 긴급 인력 요청\n출근시간: {출근시간}\n위치: {주소}\n연락처: {사무소번호}",
+          updated_at: nowIso,
+        },
+        {
+          office_id: officeId,
+          id: "change",
+          name: "현장 변경",
+          content: "[현장변경] 내일 출근 현장이 변경되었습니다.\n변경현장: {현장명}\n주소: {주소}\n출근시간: {출근시간}\n문의: {사무소번호}",
+          updated_at: nowIso,
+        },
+      ] as const;
+
+      const { error: smsSeedErr } = await supabaseAdmin
+        .from("sms_templates")
+        .upsert(defaultSmsTemplates, { onConflict: "office_id,id" });
+
+      if (smsSeedErr) throw smsSeedErr;
+
     } else if (mode === "invite") {
       const inviteCode = String(body.inviteCode ?? "").trim();
       if (!inviteCode) return jsonError("inviteCode is required", 400);
