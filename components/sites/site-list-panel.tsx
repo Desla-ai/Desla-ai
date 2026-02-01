@@ -136,9 +136,11 @@ export function SiteListPanel({
     if (checkedSiteIds.length === 0) return
     const firstSite = sites.find((s) => checkedSiteIds.includes(s.id))
     const template = customTemplates.find((t) => t.id === selectedTemplate)
-    if (firstSite && template) {
-      setSmsMessage(generateMessage(template.content, firstSite))
+    if (template) {
+      // ✅ 토큰 템플릿 원본을 그대로 편집창에 넣는다
+      setSmsMessage(template.content)
     }
+
     setSmsDialogOpen(true)
   }
 
@@ -146,8 +148,9 @@ export function SiteListPanel({
     setSelectedTemplate(templateId)
     const template = customTemplates.find((t) => t.id === templateId)
     const firstSite = sites.find((s) => checkedSiteIds.includes(s.id))
-    if (template && firstSite) {
-      setSmsMessage(generateMessage(template.content, firstSite))
+    if (template) {
+      // ✅ 토큰 템플릿 원본 유지
+      setSmsMessage(template.content)
     }
   }
 
@@ -172,32 +175,56 @@ export function SiteListPanel({
       return {
         siteId: site.id,
         siteName: site.name,
-        message: generateMessage(template.content, site),
-        recipientCount: Math.floor(Math.random() * 10) + 5, // Mock recipient count
+        message: generateMessage(smsMessage || template.content, site),
+        recipientCount: getAssignedCountForSite(site.id), // ✅ 실제 배치 인원
       }
     })
-  }, [checkedSiteIds, customTemplates, selectedTemplate, sites])
+  }, [checkedSiteIds, customTemplates, selectedTemplate, sites, workers])
 
   const handleSendSms = async () => {
     if (checkedSiteIds.length === 0) return
+    if (!smsMessage.trim()) {
+      toast.error("문자 내용을 입력해주세요.")
+      return
+    }
 
     setIsSendingSms(true)
     try {
-      // API stub: POST /api/sms/send with { siteIds: string[], mode: "perSiteTemplate" }
-      // Server performs per-site loop and sends separately with each site's template
-      await new Promise((resolve) => setTimeout(resolve, 1000))
+      const res = await fetch("/api/sms/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "bySiteWorkers",
+          siteIds: checkedSiteIds,
+          template: smsMessage, // ✅ 한 템플릿(현장정보 치환)
+          // type: "SMS", // 필요하면 고정. 생략하면 서버가 길이로 SMS/LMS 판단하도록 둘 수도 있음
+        }),
+      })
 
-      toast.success(`${checkedSiteIds.length}개 현장에 현장별 템플릿으로 문자 발송 완료`)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data?.error ?? "문자 발송 실패")
+
+      // 서버가 요약 통계를 내려주도록 구현했을 때: {sent, failed, totalTargets, skippedNoPhone...}
+      const sent = Number(data?.sent ?? 0)
+      const failed = Number(data?.failed ?? 0)
+      const totalTargets = Number(data?.totalTargets ?? 0)
+      const skippedNoPhone = Number(data?.skippedNoPhone ?? 0)
+
+      toast.success(
+        `문자 발송 완료: ${sent}건 / 실패: ${failed}건 (대상:${totalTargets}명, 번호없음:${skippedNoPhone}명)`
+      )
+
       setSmsDialogOpen(false)
       setSmsMessage("")
       setShowPerSitePreview(false)
       onCheckedSiteIdsChange([])
-    } catch {
-      toast.error("문자 발송에 실패했습니다. 다시 시도해주세요.")
+    } catch (e: any) {
+      toast.error(e?.message ?? "문자 발송에 실패했습니다. 다시 시도해주세요.")
     } finally {
       setIsSendingSms(false)
     }
   }
+
 
   const handleAddNewSite = () => {
     if (!newSiteCompanyId) {
