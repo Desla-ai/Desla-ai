@@ -6,7 +6,7 @@ export function toWorkerDTO(worker: any) {
   const joinedRolesRaw: RoleDTO[] =
     Array.isArray(worker.worker_roles)
       ? worker.worker_roles
-          .map((wr: any) => wr?.roles ?? wr?.role)   // ✅ 여기
+          .map((wr: any) => wr?.roles ?? wr?.role) // ✅ 여기
           .filter(Boolean)
           .map((r: any) => ({
             id: String(r.id),
@@ -34,7 +34,14 @@ export function toWorkerDTO(worker: any) {
     isFixed: !!worker.is_fixed,
     fixedStartDate: worker.fixed_start_date ?? null,
     fixedEndDate: worker.fixed_end_date ?? null,
+
+    // ✅ 기존 날짜(YYYY-MM-DD, date)
     lastAttendance: worker.last_attendance ?? null,
+
+    // ✅ 추가: 시/분/초 표기용 타임스탬프(timestamptz)
+    // - DB에서 snake_case로 오면 last_attendance_at
+    // - 혹시 이미 어딘가에서 camelCase로 주입되면 lastAttendanceAt
+    lastAttendanceAt: worker.last_attendance_at ?? worker.lastAttendanceAt ?? null,
 
     roles,
 

@@ -79,6 +79,24 @@ function errMsg(e: unknown, fallback: string) {
   return fallback
 }
 
+function formatKoreanDateTime(value: string) {
+  return new Date(value).toLocaleString("ko-KR", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })
+}
+
+function shortName(name: unknown) {
+  const s = typeof name === "string" ? name.trim() : ""
+  return (s || "?").slice(0, 2)
+}
+
+
 export function WorkerDetailSheet({
   worker,
   allWorkers,
@@ -321,7 +339,6 @@ export function WorkerDetailSheet({
 
       // ✅ 여기 추가: teamId 없으면 중단
       if (!currentTeamId) {
-        console.log("[promote] leaderWorkerId:", w.teamLeaderId, "teams response:", j1)
         throw new Error("현재 소속 팀(teamId)을 찾지 못했습니다. (팀 데이터 조회 결과가 비어있음)")
       }
 
@@ -567,7 +584,13 @@ export function WorkerDetailSheet({
                     </div>
                     <div>
                       <span className="text-muted-foreground">최근 출근</span>
-                      <p className="font-medium">{w.lastAttendance ? formatKoreanDate(w.lastAttendance) : "-"}</p>
+                      <p className="font-medium">
+                        {w.lastAttendanceAt
+                          ? formatKoreanDateTime(w.lastAttendanceAt)
+                          : w.lastAttendance
+                            ? formatKoreanDate(w.lastAttendance)
+                            : "-"}
+                      </p>
                     </div>
                     {assignedSite && (
                       <div>
@@ -715,7 +738,7 @@ export function WorkerDetailSheet({
                         <div className="flex items-center gap-3">
                           <Avatar className="h-10 w-10">
                             <AvatarFallback className="bg-primary text-primary-foreground">
-                              {teamLeader.name.slice(0, 2)}
+                              {shortName(teamLeader?.name)}
                             </AvatarFallback>
                           </Avatar>
                           <div>
@@ -747,7 +770,7 @@ export function WorkerDetailSheet({
                             <div key={member.id} className="flex items-center justify-between rounded-lg border border-border p-2">
                               <div className="flex items-center gap-3">
                                 <Avatar className="h-8 w-8">
-                                  <AvatarFallback className="text-xs">{member.name.slice(0, 2)}</AvatarFallback>
+                                  <AvatarFallback className="text-xs">{shortName(member?.name)}</AvatarFallback>
                                 </Avatar>
                                 <div>
                                   <p className="text-sm font-medium">{member.name}</p>
@@ -899,7 +922,7 @@ export function WorkerDetailSheet({
                       <div key={x.id} className="flex items-center justify-between rounded-lg border border-border p-3">
                         <div className="flex items-center gap-3">
                           <Avatar className="h-10 w-10">
-                            <AvatarFallback>{x.name.slice(0, 2)}</AvatarFallback>
+                            <AvatarFallback>{shortName(x?.name)}</AvatarFallback>
                           </Avatar>
                           <div>
                             <p className="font-medium">{x.name}</p>

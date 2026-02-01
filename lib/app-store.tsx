@@ -7,6 +7,7 @@ import {
   useEffect,
   useCallback,
   type ReactNode,
+  useRef,
 } from "react"
 import {
   type Site,
@@ -18,6 +19,7 @@ import {
   mockSettlements,
   defaultRoles,
 } from "@/lib/mock-data"
+import { toast } from "sonner"
 
 // Snapshot interface for saving/restoring entire state
 export interface AppSnapshot {
@@ -113,6 +115,7 @@ export interface AppState {
   uiState: {
     selectedSiteId: string | null
   }
+  prefs: OfficePrefs
 }
 
 // Default SMS templates
@@ -166,6 +169,13 @@ function buildInitialState(): AppState {
     uiState: {
       selectedSiteId: null,
     },
+    prefs: {
+      notifyCheckIn: true,
+      notifyBilling: true,
+      notifyIssues: true,
+      autoLogout: true,
+      autoRefresh: true,
+    },
   }
 }
 
@@ -175,6 +185,15 @@ type CreateWorkerInput = Omit<Worker, "id"> & {
   idCopyFrontPath: string
   idCopyBackPath: string
 }
+
+export type OfficePrefs = {
+  notifyCheckIn: boolean
+  notifyBilling: boolean
+  notifyIssues: boolean
+  autoLogout: boolean
+  autoRefresh: boolean
+}
+
 
 // Context type
 interface AppStoreContextType {
@@ -232,17 +251,20 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         }
 
         // DB 모드: sites/workers는 필수, roles는 선택(실패해도 앱 유지)
-        const [sitesRes, workersRes] = await Promise.all([
+        const [sitesRes, workersRes, prefsRes] = await Promise.all([
           fetch("/api/sites", { method: "GET" }),
           fetch("/api/workers", { method: "GET" }),
+          fetch("/api/settings/prefs", { method: "GET" }), // ✅ 추가
         ])
 
         if (!sitesRes.ok || !workersRes.ok) {
-          throw new Error(`DB fetch failed (sites=${sitesRes.status}, workers=${workersRes.status})`)
+          throw new Error(`DB fetch failed (sites=${sitesRes.status}, workers=${workersRes.status}, prefs=${prefsRes.status})`)
         }
 
         const sitesJson = await sitesRes.json()
         const workersJson = await workersRes.json()
+        const prefsJson = await prefsRes.json().catch(() => ({}))
+
 
         // roles는 실패해도 prev.roles 유지
         let rolesJson: any = null
@@ -259,6 +281,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
           sites: sitesJson.sites ?? [],
           workers: workersJson.workers ?? [],
           roles: rolesJson?.roles ?? prev.roles,
+          prefs: prefsJson?.prefs ? { ...prev.prefs, ...prefsJson.prefs } : prev.prefs, // ✅ 추가
         }))
       } catch (e) {
         console.error("hydrate failed:", e)
@@ -289,6 +312,183 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       workers: json.workers ?? [],
     }))
   }, [])
+
+  const didInitCheckinNotifyRef = useRef(false)
+  const prevWorkersByIdRef = useRef<Map<string, Worker>>(new Map())
+  const audioEnabledRef = useRef(false)
+
+  // ====== 출근 알림(띠링 + 토스트) ======
+  useEffect(() => {
+    const enable = () => { audioEnabledRef.current = true }
+    window.addEventListener("pointerdown", enable, { once: true })
+    window.addEventListener("keydown", enable, { once: true })
+    return () => {
+      window.removeEventListener("pointerdown", enable as any)
+      window.removeEventListener("keydown", enable as any)
+    }
+  }, [])
+
+  async function ding() {
+    try {
+      const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext)
+      if (!AudioCtx) return
+      const ctx = new AudioCtx()
+      if (ctx.state === "suspended") await ctx.resume().catch(() => { })
+
+      const now = ctx.currentTime
+
+      const master = ctx.createGain()
+      master.gain.setValueAtTime(1.0, now) // ✅ 전체 출력 레벨
+      master.connect(ctx.destination)
+
+      // tiny room (short echo)
+      const delay = ctx.createDelay()
+      delay.delayTime.setValueAtTime(0.028, now)
+      const fb = ctx.createGain()
+      fb.gain.setValueAtTime(0.12, now)
+      delay.connect(fb)
+      fb.connect(delay)
+
+      const wet = ctx.createGain()
+      wet.gain.setValueAtTime(0.20, now)
+      delay.connect(wet)
+      wet.connect(master)
+
+      const playTone = (freq: number, t0: number, dur: number, peak: number) => {
+        const o = ctx.createOscillator()
+        o.type = "sine"
+        o.frequency.setValueAtTime(freq, t0)
+        o.frequency.exponentialRampToValueAtTime(freq * 0.985, t0 + dur)
+
+        const g = ctx.createGain()
+        g.gain.setValueAtTime(0.0001, t0)
+        g.gain.exponentialRampToValueAtTime(peak, t0 + 0.008) // ✅ peak가 체감 볼륨
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur)
+
+        o.connect(g)
+        g.connect(master)
+        g.connect(delay)
+
+        o.start(t0)
+        o.stop(t0 + dur + 0.02)
+      }
+
+      // ✅ peak 값을 키워서 더 크게
+      playTone(1760, now, 0.14, 0.22)         // 기존 0.14 → 0.22
+      playTone(2637, now + 0.04, 0.16, 0.16)  // 기존 0.10 → 0.16
+
+      setTimeout(() => ctx.close().catch(() => { }), 500)
+    } catch { }
+  }
+
+
+
+
+
+  useEffect(() => {
+    if (!isHydrated) return
+    if (!state.prefs?.notifyCheckIn) return
+
+    const current = state.workers ?? []
+    const prevById = prevWorkersByIdRef.current
+    const nextById = new Map<string, Worker>()
+
+    // 초기 1회는 스냅샷만 저장하고 알림은 스킵
+    if (!didInitCheckinNotifyRef.current) {
+      for (const w of current) nextById.set(w.id, w)
+      prevWorkersByIdRef.current = nextById
+      didInitCheckinNotifyRef.current = true
+      return
+    }
+
+    const newlyCheckedIn: Worker[] = []
+
+    for (const w of current) {
+      nextById.set(w.id, w)
+      const prev = prevById.get(w.id)
+      if (!prev) continue
+
+      if (prev.status === "미출근" && w.status === "출근") {
+        newlyCheckedIn.push(w)
+      }
+    }
+
+    prevWorkersByIdRef.current = nextById
+
+    if (newlyCheckedIn.length === 0) return
+
+    for (const w of newlyCheckedIn) {
+      toast.success(`${w.name || "인력"}님이 출근하셨습니다.`, {
+        duration: 5000,
+      })
+      if (audioEnabledRef.current) ding()
+    }
+  }, [state.workers, state.prefs?.notifyCheckIn, isHydrated])
+
+  useEffect(() => {
+    if (!isHydrated) return
+    if (!state.prefs?.autoLogout) return
+
+    const IDLE_MS = 30 * 60 * 1000
+    let t: any
+
+    const reset = () => {
+      if (t) clearTimeout(t)
+      t = setTimeout(async () => {
+        try {
+          await fetch("/api/auth/logout", { method: "POST" })
+        } catch { }
+        window.location.href = "/login"
+      }, IDLE_MS)
+    }
+
+    const events = ["mousemove", "mousedown", "keydown", "scroll", "touchstart", "click"]
+    events.forEach((ev) => window.addEventListener(ev, reset, { passive: true }))
+    reset()
+
+    return () => {
+      if (t) clearTimeout(t)
+      events.forEach((ev) => window.removeEventListener(ev, reset as any))
+    }
+  }, [state.prefs?.autoLogout, isHydrated])
+
+
+  useEffect(() => {
+    if (!isHydrated) return
+    if (!state.prefs?.autoRefresh) return
+
+    const INTERVAL = 5 * 60 * 1000
+    let id: any = null
+
+    const tick = () => {
+      refreshWorkers().catch(() => { })
+    }
+
+    const start = () => {
+      if (id) clearInterval(id)
+      tick()
+      id = setInterval(tick, INTERVAL)
+    }
+
+    const stop = () => {
+      if (id) clearInterval(id)
+      id = null
+    }
+
+    const onVis = () => {
+      if (document.visibilityState === "visible") start()
+      else stop()
+    }
+
+    document.addEventListener("visibilitychange", onVis)
+    start()
+
+    return () => {
+      stop()
+      document.removeEventListener("visibilitychange", onVis)
+    }
+  }, [state.prefs?.autoRefresh, isHydrated, refreshWorkers])
+
 
   type WorkerPatch = Partial<Omit<Worker, "id">> & {
     idFront6?: string

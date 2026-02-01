@@ -144,6 +144,21 @@ export default function AttendanceKioskPage() {
     setCheckedInWorker(null)
   }, [])
 
+  // ✅ 결과 화면이면 3초 후 자동으로 입력 화면으로 복귀
+  useEffect(() => {
+    const isResult =
+      checkinState !== "input" // success / not_found / already_assigned / already_checked_in / error
+
+    if (!isResult) return
+
+    const t = window.setTimeout(() => {
+      resetToInput()
+    }, 3000)
+
+    return () => window.clearTimeout(t)
+  }, [checkinState, resetToInput])
+
+
   const handleKeyPress = useCallback(
     (key: string) => {
       if (phoneNumber.length < 11) setPhoneNumber((prev) => prev + key)

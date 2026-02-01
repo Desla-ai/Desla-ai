@@ -1273,7 +1273,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                       <TableHead className="min-w-[100px]">이름</TableHead>
                       <TableHead className="min-w-[80px]">역할</TableHead>
                       <TableHead className="min-w-[80px]">배치 유형</TableHead>
-                      <TableHead className="min-w-[140px] text-right">공수</TableHead>
+                      <TableHead className="min-w-[180px] text-center">공수</TableHead>
                       <TableHead className="min-w-[100px] text-right">공수당(단가)</TableHead>
                       <TableHead className="w-[120px] text-right">금액확정</TableHead>
                     </TableRow>
@@ -1301,21 +1301,18 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                             )
                           })()}
                         </TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex items-center justify-end gap-1">
+                        <TableCell className="text-center align-middle">
+                          <div className="mx-auto grid w-fit grid-cols-[72px_64px_72px] items-center gap-2">
                             <Button
                               variant="outline"
                               size="sm"
-                              className="h-8 px-2 bg-transparent"
+                              className="h-8 w-[72px] bg-transparent justify-center"
                               disabled={Boolean(dailyLockedByWorkerId[worker.id])}
                               onClick={async () => {
                                 if (dailyLockedByWorkerId[worker.id]) return
                                 const next = Math.max(0, getWorkUnits(worker.id) - 0.5)
-
-                                // draft 반영(즉시 UI 반영)
                                 setWorkUnitsDraftByWorkerId((p) => ({ ...p, [worker.id]: next }))
 
-                                // ✅ 즉시 저장
                                 try {
                                   setAutoSavingRowIds((p) => ({ ...p, [worker.id]: true }))
                                   setAutoSaveErrorByWorkerId((p) => {
@@ -1330,7 +1327,6 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                                     workUnits: next,
                                   })
                                   applyDailySettlementRow(row)
-
                                 } catch (e: any) {
                                   setAutoSaveErrorByWorkerId((p) => ({ ...p, [worker.id]: e?.message ?? "공수 저장 실패" }))
                                 } finally {
@@ -1341,19 +1337,18 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                               -0.5
                             </Button>
 
-                            <div className="w-[56px] text-right tabular-nums">
+                            <div className="rounded-md bg-muted px-2 py-1 text-center tabular-nums font-semibold">
                               {getWorkUnits(worker.id).toFixed(1)}
                             </div>
 
                             <Button
                               variant="outline"
                               size="sm"
-                              className="h-8 px-2 bg-transparent"
+                              className="h-8 w-[72px] bg-transparent justify-center"
                               disabled={Boolean(dailyLockedByWorkerId[worker.id])}
                               onClick={async () => {
                                 if (dailyLockedByWorkerId[worker.id]) return
                                 const next = getWorkUnits(worker.id) + 0.5
-
                                 setWorkUnitsDraftByWorkerId((p) => ({ ...p, [worker.id]: next }))
 
                                 try {
@@ -1370,7 +1365,6 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                                     workUnits: next,
                                   })
                                   applyDailySettlementRow(row)
-
                                 } catch (e: any) {
                                   setAutoSaveErrorByWorkerId((p) => ({ ...p, [worker.id]: e?.message ?? "공수 저장 실패" }))
                                 } finally {
@@ -1382,7 +1376,7 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                             </Button>
                           </div>
 
-                          <div className="mt-1 flex justify-end">
+                          <div className="mt-1 flex justify-center">
                             {autoSavingRowIds[worker.id] ? (
                               <span className="text-[10px] text-muted-foreground">저장중…</span>
                             ) : autoSaveErrorByWorkerId[worker.id] ? (
@@ -1392,7 +1386,6 @@ export function SiteControlPanel({ site, isOpen, onDeleteSite }: SiteControlPane
                             )}
                           </div>
                         </TableCell>
-
                         <TableCell className="text-right">
                           <Input
                             type="number"

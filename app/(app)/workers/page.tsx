@@ -52,7 +52,7 @@ type WorkerStatus = (typeof statusOptions)[number]
 
 export default function WorkersPage() {
   const searchParams = useSearchParams()
-  const { state, addWorker, updateWorker, deleteWorker } = useAppStore()
+  const { state, addWorker, updateWorker, deleteWorker, refreshWorkers } = useAppStore()
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState<string>("all")
   const [roleFilter, setRoleFilter] = useState<string>("all")
@@ -86,6 +86,50 @@ export default function WorkersPage() {
       setAddWorkerDialogOpen(true)
     }
   }, [searchParams])
+
+  useEffect(() => {
+    let timer: any = null
+
+    const start = () => {
+      // 즉시 1회 갱신(UX 개선)
+      refreshWorkers().catch(() => { })
+      // 5초 폴링
+      timer = setInterval(() => {
+        refreshWorkers().catch(() => { })
+      }, 5000)
+    }
+
+    const stop = () => {
+      if (timer) clearInterval(timer)
+      timer = null
+    }
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") start()
+      else stop()
+    }
+
+    start()
+    document.addEventListener("visibilitychange", onVisibility)
+
+    return () => {
+      stop()
+      document.removeEventListener("visibilitychange", onVisibility)
+    }
+  }, [refreshWorkers])
+
+  function formatKoreanDateTime(value: string) {
+    return new Date(value).toLocaleString("ko-KR", {
+      timeZone: "Asia/Seoul",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })
+  }
+
 
   const filteredWorkers = useMemo(() => {
     return state.workers.filter((worker) => {
@@ -481,9 +525,11 @@ export default function WorkersPage() {
                             )}
                           </TableCell>
                           <TableCell className="text-sm">
-                            {worker.lastAttendance
-                              ? formatKoreanDate(worker.lastAttendance)
-                              : "-"}
+                            {(worker as any).lastAttendanceAt
+                              ? formatKoreanDateTime((worker as any).lastAttendanceAt)
+                              : worker.lastAttendance
+                                ? formatKoreanDate(worker.lastAttendance)
+                                : "-"}
                           </TableCell>
                         </TableRow>
                       )

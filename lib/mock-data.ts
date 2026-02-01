@@ -25,6 +25,7 @@ export interface Worker {
   teamMembers?: string[]
   status: "미출근" | "출근" | "배치"
   lastAttendance: string | null
+  lastAttendanceAt?: string | null    // ISO timestamp (timestamptz)
   assignedSiteId?: string
   isFixed?: boolean
   fixedStartDate?: string

@@ -9,8 +9,11 @@ function normalizePhone(phone: string) {
   return (phone ?? "").replace(/\D/g, "")
 }
 
-function todayYYYYMMDD() {
-  return new Date().toISOString().slice(0, 10) // YYYY-MM-DD (UTC 기준)
+// ✅ 한국 날짜(YYYY-MM-DD) 생성 (KST 기준)
+function todayYYYYMMDDKST() {
+  const now = new Date()
+  const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000)
+  return kst.toISOString().slice(0, 10)
 }
 
 export async function POST(req: Request) {
@@ -29,7 +32,7 @@ export async function POST(req: Request) {
     // 1) worker 찾기 (office_id + phone)
     const { data: worker, error: findErr } = await supabaseAdmin
       .from("workers")
-      .select("id, office_id, name, phone, status, last_attendance, assigned_site_id")
+      .select("id, office_id, name, phone, status, last_attendance, last_attendance_at, assigned_site_id")
       .eq("office_id", officeId)
       .eq("phone", phone)
       .maybeSingle()
@@ -40,37 +43,34 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "WORKER_NOT_FOUND" }, { status: 404 })
     }
 
-    const today = todayYYYYMMDD()
-
     // ✅ (1) 이미 배치된 사람 차단
     if (worker.assigned_site_id) {
-      return NextResponse.json(
-        { ok: false, error: "WORKER_ALREADY_ASSIGNED" },
-        { status: 409 }
-      )
+      return NextResponse.json({ ok: false, error: "WORKER_ALREADY_ASSIGNED" }, { status: 409 })
     }
 
-    // ✅ (2) 이미 출근한 사람 차단 (상태/날짜 둘 다 체크)
-    const last = worker.last_attendance ? String(worker.last_attendance) : null
-    const alreadyToday = last === today
-    const alreadyByStatus = worker.status === "출근"
-
-    if (alreadyToday || alreadyByStatus) {
-      return NextResponse.json(
-        { ok: false, error: "WORKER_ALREADY_CHECKED_IN" },
-        { status: 409 }
-      )
+    // ✅ (2) 미출근일 때만 출근 허용 (last_attendance는 상관 없음)
+    if (worker.status !== "미출근") {
+      if (worker.status === "출근") {
+        return NextResponse.json({ ok: false, error: "WORKER_ALREADY_CHECKED_IN" }, { status: 409 })
+      }
+      return NextResponse.json({ ok: false, error: "WORKER_NOT_ELIGIBLE" }, { status: 409 })
     }
 
-    // 2) 출근 처리
+    // ✅ 기록값
+    const kstDate = todayYYYYMMDDKST()      // date 컬럼(한국 날짜)
+    const nowIso = new Date().toISOString() // timestamptz 컬럼(시분초 포함, UTC 저장)
+
+    // 3) 출근 처리
     const { data: updated, error: updErr } = await supabaseAdmin
       .from("workers")
       .update({
         status: "출근",
-        last_attendance: today,
+        last_attendance: kstDate,
+        // ⚠️ DB에 last_attendance_at 컬럼이 있어야 함 (timestamptz)
+        last_attendance_at: nowIso,
       })
       .eq("id", worker.id)
-      .select("id, name, phone, status, last_attendance")
+      .select("id, name, phone, status, last_attendance, last_attendance_at")
       .single()
 
     if (updErr) return jsonError(updErr.message, 500)

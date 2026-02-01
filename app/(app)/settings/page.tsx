@@ -501,8 +501,12 @@ export default function SettingsPage() {
         toast.error(json?.error ?? `설정 저장 실패 (${res.status})`)
         return
       }
+
       const next = (json?.prefs ?? {}) as Partial<OfficePrefs>
       setPrefs((prev) => ({ ...prev, ...next }))
+
+      // ✅ 추가: 전역 적용 레이어가 즉시 반영되도록 “서버값 재조회”
+      await loadPrefs()
     } catch (e) {
       console.error(e)
       toast.error("설정 저장 중 오류가 발생했습니다")
@@ -510,6 +514,7 @@ export default function SettingsPage() {
       setIsSavingPrefsKey(null)
     }
   }
+
 
   useEffect(() => {
     void refreshSnapshots()
