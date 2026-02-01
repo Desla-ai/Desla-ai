@@ -99,6 +99,10 @@ interface Invoice {
   invoiceNumber: string
   siteId: string
   siteName: string
+  siteLabel?: string
+  siteIds?: string[]
+  siteNames?: string[]
+  siteCount?: number
   contractorName: string
   status: InvoiceStatus
   issueDate: string
@@ -231,16 +235,32 @@ export default function BillingPage() {
 
   // Filtered invoices
   const filteredInvoices = useMemo(() => {
-    return invoices.filter(inv => {
+    const q = search.trim().toLowerCase()
+
+    return invoices.filter((inv) => {
       const matchesStatus = statusFilter === "all" || inv.status === statusFilter
-      const matchesSite = siteFilter === "all" || inv.siteId === siteFilter
-      const matchesSearch = search === "" ||
-        inv.invoiceNumber.toLowerCase().includes(search.toLowerCase()) ||
-        inv.siteName.toLowerCase().includes(search.toLowerCase()) ||
-        inv.contractorName.toLowerCase().includes(search.toLowerCase())
+
+      // ✅ 현장 필터: 대표현장(siteId) + 포함현장(siteIds)까지 매칭
+      const invSiteIds = Array.isArray(inv.siteIds) ? inv.siteIds : []
+      const matchesSite =
+        siteFilter === "all" ||
+        inv.siteId === siteFilter ||
+        invSiteIds.includes(siteFilter)
+
+      // ✅ 검색: 청구번호/표시현장(siteLabel)/포함현장(siteNames)/건설사
+      const displaySite = (inv.siteLabel ?? inv.siteName ?? "").toLowerCase()
+      const invSiteNames = Array.isArray(inv.siteNames) ? inv.siteNames : []
+      const matchesSearch =
+        q === "" ||
+        inv.invoiceNumber.toLowerCase().includes(q) ||
+        displaySite.includes(q) ||
+        invSiteNames.some((n) => String(n).toLowerCase().includes(q)) ||
+        inv.contractorName.toLowerCase().includes(q)
+
       return matchesStatus && matchesSite && matchesSearch
     })
   }, [invoices, statusFilter, siteFilter, search])
+
 
   // Line item handlers
   const updateLineItem = (index: number, updates: Partial<InvoiceLineItem>) => {
@@ -503,7 +523,9 @@ export default function BillingPage() {
                           <TableCell>
                             <div className="flex items-center gap-2">
                               <Building2 className="h-4 w-4 text-muted-foreground shrink-0" />
-                              <span className="truncate max-w-[140px]">{invoice.siteName}</span>
+                              <span className="truncate max-w-[140px]">
+                                {invoice.siteLabel ?? invoice.siteName}
+                              </span>
                             </div>
                           </TableCell>
                           <TableCell>{invoice.contractorName}</TableCell>
@@ -543,6 +565,7 @@ export default function BillingPage() {
                                   </DropdownMenuItem>
                                 )}
                                 <DropdownMenuItem onClick={() => window.open(`/api/invoices/${invoice.id}/pdf`, "_blank")}>
+                                  <Download className="mr-2 h-4 w-4" />
                                   PDF 다운로드
                                 </DropdownMenuItem>
                                 {invoice.status === "초안" && (

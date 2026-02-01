@@ -15,6 +15,72 @@ function isoDate(d: Date) {
   return d.toISOString().slice(0, 10)
 }
 
+// -------------------------
+// 포함 현장 요약 유틸 (LABOR_INVOICE 대응)
+// -------------------------
+function uniq<T>(arr: T[]) {
+  return Array.from(new Set(arr))
+}
+
+function asStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  return v
+    .map((x) => (typeof x === "string" ? x : x == null ? "" : String(x)))
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function extractLaborInvoiceSitesFromMeta(meta: any): { siteIds: string[]; siteNames: string[] } {
+  if (!meta || meta.kind !== "LABOR_INVOICE") return { siteIds: [], siteNames: [] }
+
+  if (Array.isArray(meta.sites)) {
+    const siteIds = uniq(asStringArray(meta.sites.map((s: any) => s?.id)))
+    const siteNames = uniq(asStringArray(meta.sites.map((s: any) => s?.name)))
+    return { siteIds, siteNames }
+  }
+
+  if (Array.isArray(meta.roleRows)) {
+    const siteIds = uniq(asStringArray(meta.roleRows.map((r: any) => r?.siteId ?? r?.site_id)))
+    const siteNames = uniq(asStringArray(meta.roleRows.map((r: any) => r?.siteName ?? r?.site_name)))
+    return { siteIds, siteNames }
+  }
+
+  return { siteIds: [], siteNames: [] }
+}
+
+function buildSiteLabel(primarySiteName: string, siteNames: string[]) {
+  const names = siteNames.filter(Boolean)
+  if (names.length <= 1) return primarySiteName || names[0] || ""
+  const head = primarySiteName || names[0] || ""
+  return `${head} 외 ${names.length - 1}건`
+}
+
+function buildInvoiceSiteSummary(inv: any) {
+  const primarySiteName = inv?.sites?.name ?? ""
+  const meta = inv?.meta ?? {}
+
+  if (meta?.kind !== "LABOR_INVOICE") {
+    return {
+      siteLabel: primarySiteName,
+      siteIds: inv?.site_id ? [String(inv.site_id)] : [],
+      siteNames: primarySiteName ? [String(primarySiteName)] : [],
+      siteCount: inv?.site_id ? 1 : 0,
+    }
+  }
+
+  const { siteIds, siteNames } = extractLaborInvoiceSitesFromMeta(meta)
+  const siteCount = siteNames.length || siteIds.length || 0
+  const siteLabel = buildSiteLabel(
+    primarySiteName,
+    siteNames.length ? siteNames : [primarySiteName].filter(Boolean)
+  )
+
+  return { siteLabel, siteIds, siteNames, siteCount }
+}
+
+// -------------------------
+// POST /api/invoices/[id]/status
+// -------------------------
 export async function POST(req: Request, ctx: any) {
   try {
     const cookieStore = await cookies()
@@ -59,10 +125,12 @@ export async function POST(req: Request, ctx: any) {
       .update(updates)
       .eq("office_id", session.officeId)
       .eq("id", id)
-      .select("*, sites(name), invoice_line_items(*)")
+      .select("*, meta, sites(name), invoice_line_items(*)")
       .single()
 
     if (updErr) return jsonError(updErr.message, 500)
+
+    const siteSummary = buildInvoiceSiteSummary(inv)
 
     return NextResponse.json({
       invoice: {
@@ -70,6 +138,13 @@ export async function POST(req: Request, ctx: any) {
         invoiceNumber: inv.invoice_number,
         siteId: inv.site_id,
         siteName: inv.sites?.name ?? "",
+
+        // ✅ 추가: 통합 노무비(다현장) 표시/검색/필터를 위한 필드
+        siteLabel: siteSummary.siteLabel,
+        siteIds: siteSummary.siteIds,
+        siteNames: siteSummary.siteNames,
+        siteCount: siteSummary.siteCount,
+
         contractorName: inv.contractor_name,
         status: inv.status,
         issueDate: inv.issue_date ?? "",
@@ -89,7 +164,7 @@ export async function POST(req: Request, ctx: any) {
         attachments: inv.attachments ?? [],
         createdAt: inv.created_at,
         updatedAt: inv.updated_at,
-      }
+      },
     })
   } catch (e: any) {
     return jsonError(e?.message ?? "Failed to update status", 500)

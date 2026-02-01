@@ -22,7 +22,7 @@ function getSupabaseAdmin() {
 // ---- Layout constants ----
 const PAGE_W = 595.28; // A4 portrait
 const PAGE_H = 841.89;
-const M = 40;
+const M = 20; // ✅ 통일: Generic(수기)도 노무비와 같은 마진 사용
 const CONTENT_W = PAGE_W - M * 2;
 
 const COLOR_TEXT = rgb(0.12, 0.12, 0.12);
@@ -58,7 +58,11 @@ function kstDateYmd() {
 
 // ---- Text measurement + wrapping ----
 function textWidth(text: string, font: any, size: number) {
-  return font.widthOfTextAtSize(text, size);
+  try {
+    return font.widthOfTextAtSize(text, size);
+  } catch {
+    return safeStr(text).length * size * 0.52;
+  }
 }
 
 function wrapTextByWidth(text: string, font: any, fontSize: number, maxWidth: number) {
@@ -136,6 +140,53 @@ function drawRectBorder(page: any, x: number, y: number, w: number, h: number, c
   page.drawRectangle({ x, y, width: w, height: h, borderColor: color, borderWidth: 1 });
 }
 
+// ===== 공용 도형/셀 유틸 (Generic에서 노무비 상단 UI 재사용) =====
+function drawLine(page: any, x1: number, y1: number, x2: number, y2: number, thickness = 0.5, color = COLOR_LINE) {
+  page.drawLine({ start: { x: x1, y: y1 }, end: { x: x2, y: y2 }, thickness, color });
+}
+
+function drawRect(page: any, x: number, y: number, w: number, h: number, borderWidth = 0.8, borderColor = COLOR_LINE) {
+  page.drawRectangle({ x, y, width: w, height: h, borderWidth, borderColor });
+}
+
+function fillRect(page: any, x: number, y: number, w: number, h: number, color: any) {
+  page.drawRectangle({ x, y, width: w, height: h, color });
+}
+
+function drawTextInCell(
+  page: any,
+  text: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  opts: {
+    font: any;
+    size?: number;
+    align?: "left" | "center" | "right";
+    padX?: number;
+    color?: any;
+    noEllipsis?: boolean;
+  }
+) {
+  const font = opts.font;
+  const size = opts.size ?? 9.5;
+  const align = opts.align ?? "center";
+  const padX = opts.padX ?? 2;
+  const color = opts.color ?? COLOR_TEXT;
+
+  const raw = safeStr(text).trim();
+  const s = opts.noEllipsis ? raw : ellipsisText(raw, font, size, Math.max(0, w - padX * 2));
+  const tw = textWidth(s, font, size);
+
+  let tx = x + padX;
+  if (align === "center") tx = x + (w - tw) / 2;
+  if (align === "right") tx = x + w - padX - tw;
+
+  const ty = y + (h - size) / 2 + 1;
+  page.drawText(s, { x: tx, y: ty, font, size, color });
+}
+
 function asNumber(v: any, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -186,26 +237,9 @@ function extractAttachmentPaths(attachments: any): string[] {
   return [];
 }
 
-/**
- * LABOR_INVOICE PDF (월 노무비 청구서 템플릿형) — 전면 재작성 버전
- * - 목표: 엑셀 템플릿처럼 "고정 셀/병합 셀" 느낌으로 안정적으로 렌더링
- * - 문제 해결:
- *   1) 상단 우측 '합계금액' 과밀/겹침 -> 합계/계좌 줄 분리 + 고정 베이스라인
- *   2) '출력상황 + 기간'을 날짜 그리드의 1차 헤더 row(병합셀)로 강제 결합
- *   3) 우측 합계/총합계 박스를 표의 마지막 열로 붙여 "한 표"로 보이게
- *
- * 참고 템플릿(깔끔한 쪽): https://www.genspark.ai/api/files/s/yFmkyOAp [Source]
- * 문제 사례(현재 출력): https://www.genspark.ai/api/files/s/XnLkLrw8 [Source]
- */
-// LABOR_INVOICE PDF (월 노무비 청구서) — renderLaborInvoicePDF 전면 재작성
-// 템플릿 참고: https://www.genspark.ai/api/files/s/yFmkyOAp [Source]
-// 현재 출력 참고: https://www.genspark.ai/api/files/s/Oh7MIHcA [Source]
-
-
-// LABOR_INVOICE PDF (월 노무비 청구서) — 11월 레퍼런스(zW35ouFC) 기준 재작성
-// Reference: https://www.genspark.ai/api/files/s/zW35ouFC [Source]
-// Current bug example: https://www.genspark.ai/api/files/s/vLAN2Dps [Source]
-
+// =========================
+// LABOR_INVOICE PDF (월 노무비 청구서)
+// =========================
 export function renderLaborInvoicePDF({
   pdfDoc,
   fontReg,
@@ -479,11 +513,11 @@ export function renderLaborInvoicePDF({
 
   const issued = kstYmd(
     invoice?.issuedAt ??
-      invoice?.issue_date ??
-      invoice?.date ??
-      invoice?.created_at ??
-      periodEnd ??
-      periodStart
+    invoice?.issue_date ??
+    invoice?.date ??
+    invoice?.created_at ??
+    periodEnd ??
+    periodStart
   );
 
   const monthTitle = (() => {
@@ -855,6 +889,47 @@ export function renderLaborInvoicePDF({
 
   const fmtUnits1 = (n: number) => (Number.isFinite(n) ? n.toFixed(1) : "");
 
+  const splitSiteTo2Lines = (name: string) => {
+    const t = safe(name, "").trim();
+    if (!t) return ["", ""];
+
+    // 공백이 1개라는 전제면, "센트럴 푸르지오" -> ["센트럴", "푸르지오"]
+    const parts = t.split(/\s+/).filter(Boolean);
+
+    if (parts.length <= 1) return [t, ""];
+    return [parts[0], parts.slice(1).join(" ")];
+  };
+
+  const drawTwoLineCentered = (
+    line1: string,
+    line2: string,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    font: any,
+    size: number,
+    color: any
+  ) => {
+    const gap = 0.6; // 줄간격(폰트 5 기준)
+    const lines = line2 ? 2 : 1;
+    const totalH = lines * size + (lines - 1) * gap;
+
+    // 위줄 y, 아래줄 y 계산(수직 중앙정렬)
+    let yy = y + (h + totalH) / 2 - size;
+
+    const drawOne = (t: string, yText: number) => {
+      if (!t) return;
+      const tw = textWidth(t, font, size);
+      const tx = x + (w - tw) / 2;
+      page.drawText(t, { x: tx, y: yText, font, size, color });
+    };
+
+    drawOne(line1, yy);
+    if (line2) drawOne(line2, yy - size - gap);
+  };
+
+
   // =========================
   // 5) Body rows + Footer
   // =========================
@@ -878,15 +953,15 @@ export function renderLaborInvoicePDF({
 
     const unitPriceRaw = nnum(
       row.unitPrice ??
-        row.unit_price ??
-        row.unitCost ??
-        row.unit_cost ??
-        row.rate ??
-        row.dailyWage ??
-        row.daily_wage ??
-        row.price ??
-        row.unit ??
-        0
+      row.unit_price ??
+      row.unitCost ??
+      row.unit_cost ??
+      row.rate ??
+      row.dailyWage ??
+      row.daily_wage ??
+      row.price ??
+      row.unit ??
+      0
     );
 
     const vals31 = normalizeDayVals31(row);
@@ -896,14 +971,14 @@ export function renderLaborInvoicePDF({
 
     const amountExVat = nnum(
       row.amountExVat ??
-        row.amount_ex_vat ??
-        row.amount ??
-        row.totalAmount ??
-        row.total_amount ??
-        row.sum ??
-        row.total ??
-        row.gross ??
-        unitPriceRaw * manDays
+      row.amount_ex_vat ??
+      row.amount ??
+      row.totalAmount ??
+      row.total_amount ??
+      row.sum ??
+      row.total ??
+      row.gross ??
+      unitPriceRaw * manDays
     );
 
     const unitPrice = unitPriceRaw > 0 ? unitPriceRaw : manDays > 0 ? Math.round(amountExVat / manDays) : 0;
@@ -915,12 +990,9 @@ export function renderLaborInvoicePDF({
     const rowSiteName = getRowSiteName(row);
 
     // left columns
-    drawTextInCell(rowSiteName, gridX, y, colSiteW, rowH, {
-      font: fontReg,
-      size: 7.0,
-      align: "center",
-      // 현장명은 짧게만 보여야 해서 ellipsis 허용(기존 drawTextInCell 기본값)
-    });
+    const [s1, s2] = splitSiteTo2Lines(rowSiteName);
+
+    drawTwoLineCentered(s1, s2, gridX, y, colSiteW, rowH, fontReg, 5.0, C_TEXT);
     drawTextInCell(roleName, gridX + colSiteW, y, colRoleW, rowH, { font: fontReg, size: 7.0, align: "center" });
 
     // ✅ day columns: 숫자(공수) 전용 렌더러로만 출력 -> "..."로 바뀌는 현상 원천 차단 [Source](https://www.genspark.ai/api/files/s/rrpEfMQh)
@@ -1024,10 +1096,9 @@ export function renderLaborInvoicePDF({
   return page;
 }
 
-
-
-
-
+// =========================
+// Generic Invoice PDF (수기 청구서) — 상단 UI를 노무비 스타일(수준2)로 통일
+// =========================
 async function renderGenericInvoicePDF(args: {
   pdfDoc: PDFDocument;
   fontReg: any;
@@ -1036,46 +1107,179 @@ async function renderGenericInvoicePDF(args: {
   invoice: any;
   office: any;
   site: any;
+  officeProfile: any;
   supabaseAdmin: any;
 }) {
-  const { pdfDoc, fontReg, fontBold, fontStd, invoice, office, site, supabaseAdmin } = args;
+  const { pdfDoc, fontReg, fontBold, fontStd, invoice, office, site, officeProfile, supabaseAdmin } = args;
 
-  // ---- Main page ----
-  let page = pdfDoc.addPage([PAGE_W, PAGE_H]);
-  let y = PAGE_H - M;
+  const page = pdfDoc.addPage([PAGE_W, PAGE_H]);
 
-  drawText(page, "청구서", M, y - 18, fontBold, 18);
-  y -= 34;
+  // ===== 상단 UI (노무비 스타일) =====
+  const titleH = 26;
+  const titleTop = PAGE_H - M;
+  const topBlockH = 160;
+  const gapAfterTop = 10;
 
-  const invoiceNo = safeStr(invoice.invoice_number || invoice.id);
+  const topBoxTopY = titleTop - titleH - 6;
+  const topBoxY = topBoxTopY - topBlockH;
 
-  drawText(page, `청구번호: ${invoiceNo}`, M, y, fontReg, 11);
-  drawText(page, `상태: ${safeStr(invoice.status)}`, M + 260, y, fontReg, 11);
-  y -= 18;
+  drawTextInCell(page, "청구서", M, titleTop - titleH, CONTENT_W, titleH, {
+    font: fontBold,
+    size: 14,
+    align: "center",
+    noEllipsis: true,
+  });
 
-  drawText(page, `발행일: ${ymd(invoice.issue_date)}`, M, y, fontReg, 11);
-  drawText(page, `납기일: ${ymd(invoice.due_date)}`, M + 260, y, fontReg, 11);
-  y -= 16;
+  drawRect(page, M, topBoxY, CONTENT_W, topBlockH, 1.0);
 
-  drawHLine(page, M, y, CONTENT_W, 1, COLOR_LINE_SOFT);
-  y -= 18;
+  const leftW = Math.round(CONTENT_W * 0.58);
+  const rightW = CONTENT_W - leftW;
+  const xL = M;
+  const xR = M + leftW;
+  drawLine(page, xR, topBoxY, xR, topBoxY + topBlockH, 0.8);
 
-  // 간단 key/value 박스
-  const kvBoxH = 120;
-  const kvBoxY = y - kvBoxH;
-  page.drawRectangle({ x: M, y: kvBoxY, width: CONTENT_W, height: kvBoxH, borderColor: COLOR_LINE_SOFT, borderWidth: 1 });
+  const issued = ymd(invoice?.issue_date ?? invoice?.created_at ?? "");
+  const due = ymd(invoice?.due_date ?? "");
+  const invoiceNo = safeStr(invoice?.invoice_number || invoice?.id || "");
+  const status = safeStr(invoice?.status || "");
+  const contractorName = safeStr(invoice?.contractor_name || "");
+  const siteName = safeStr(site?.name || "");
 
-  drawText(page, `사무소: ${safeStr(office.name)}`, M + 12, y - 26, fontReg, 11);
-  drawText(page, `현장명: ${safeStr(site.name)}`, M + 12, y - 46, fontReg, 11);
-  drawText(page, `업체명: ${safeStr(invoice.contractor_name)}`, M + 12, y - 66, fontReg, 11);
+  const LEFT_LABEL_W = 92;
+  const LEFT_ROW_H = 20;
+  const LEFT_PAD_X = 6;
+  let ly = topBoxY + topBlockH - 30;
 
-  y = kvBoxY - 18;
+  const drawLeftKV = (label: string, value: string, bold = false) => {
+    drawTextInCell(page, label, xL, ly, LEFT_LABEL_W, LEFT_ROW_H, {
+      font: fontReg,
+      size: 9.5,
+      align: "left",
+      padX: LEFT_PAD_X,
+      color: COLOR_MUTED,
+      noEllipsis: true,
+    });
 
-  drawText(page, "총액", M, y, fontBold, 11);
-  drawText(page, formatWon(invoice.total), M + 60, y, fontBold, 11);
-  y -= 16;
+    drawTextInCell(page, value, xL + LEFT_LABEL_W, ly, leftW - LEFT_LABEL_W, LEFT_ROW_H, {
+      font: bold ? fontBold : fontReg,
+      size: bold ? 11 : 9.5,
+      align: "left",
+      padX: LEFT_PAD_X,
+    });
 
-  // ---- Table ----
+    ly -= LEFT_ROW_H;
+  };
+
+  // 수기 청구서는 단일 현장이므로 상단에 현장 표시 OK
+  drawLeftKV("청구번호", invoiceNo);
+  drawLeftKV("상태", status);
+  drawLeftKV("업체명", contractorName, true);
+  drawLeftKV("현장", siteName);
+
+  drawTextInCell(page, "아래와 같이 계산 청구합니다", xL, topBoxY + 8, leftW, 18, {
+    font: fontReg,
+    size: 9.5,
+    align: "center",
+    color: COLOR_MUTED,
+    noEllipsis: true,
+  });
+
+  // 우측 공급자 상세(노무비 수준2)
+  const supplierBizNo = safeStr(officeProfile?.biz_no ?? "");
+  const supplierName = safeStr(officeProfile?.supplier_name ?? office?.name ?? "");
+  const supplierCeo = safeStr(officeProfile?.ceo_name ?? "");
+  const supplierAddr = safeStr(officeProfile?.address ?? "");
+  const supplierPhone = safeStr(officeProfile?.phone ?? "");
+  const bizType = safeStr(officeProfile?.biz_type ?? "");
+  const bizItem = safeStr(officeProfile?.biz_item ?? "");
+  const bankName = safeStr(officeProfile?.bank_name ?? "");
+  const bankAccount = safeStr(officeProfile?.bank_account ?? "");
+  const bankHolder = safeStr(officeProfile?.bank_holder ?? "");
+
+  const rX = xR;
+  const rY = topBoxY;
+  const rH = topBlockH;
+
+  const sumRowH = 24;
+  const infoH = rH - sumRowH;
+
+  drawRect(page, rX, rY, rightW, rH, 0.8, COLOR_LINE);
+  drawLine(page, rX, rY + sumRowH, rX + rightW, rY + sumRowH, 0.8);
+
+  const labelW = 44;
+  const drawInfoPair = (x: number, y: number, w: number, h: number, label: string, value: string) => {
+    drawLine(page, x + labelW, y, x + labelW, y + h, 0.5, COLOR_LINE_SOFT);
+    drawTextInCell(page, label, x, y, labelW, h, {
+      font: fontReg,
+      size: 8.8,
+      align: "center",
+      color: COLOR_MUTED,
+      noEllipsis: true,
+    });
+    drawTextInCell(page, value, x + labelW, y, w - labelW, h, {
+      font: fontReg,
+      size: 8.8,
+      align: "left",
+      padX: 5,
+    });
+  };
+
+  type InfoRow =
+    | { type: "single"; label: string; value: string }
+    | { type: "double"; leftLabel: string; leftValue: string; rightLabel: string; rightValue: string };
+
+  const infoRows: InfoRow[] = [
+    { type: "double", leftLabel: "등록번호", leftValue: supplierBizNo, rightLabel: "연락처", rightValue: supplierPhone },
+    { type: "double", leftLabel: "상  호", leftValue: supplierName, rightLabel: "대  표", rightValue: supplierCeo },
+    { type: "single", label: "주  소", value: supplierAddr },
+    { type: "double", leftLabel: "업  태", leftValue: bizType, rightLabel: "종  목", rightValue: bizItem },
+  ];
+
+  if (bankName || bankAccount || bankHolder) {
+    const bankLine = [bankName, bankAccount].filter(Boolean).join(" ");
+    const holderLine = bankHolder ? `예금주:${bankHolder}` : "";
+    infoRows.push({ type: "single", label: "계  좌", value: [bankLine, holderLine].filter(Boolean).join(" / ") });
+  }
+
+  const infoRowH = Math.floor(infoH / infoRows.length);
+  const infoAreaTop = rY + rH;
+
+  for (let i = 0; i < infoRows.length; i++) {
+    const yRow = infoAreaTop - (i + 1) * infoRowH;
+    drawLine(page, rX, yRow, rX + rightW, yRow, 0.5, COLOR_LINE_SOFT);
+
+    const row = infoRows[i];
+    if (row.type === "single") {
+      drawInfoPair(rX, yRow, rightW, infoRowH, row.label, row.value);
+    } else {
+      const halfW = rightW / 2;
+      drawLine(page, rX + halfW, yRow, rX + halfW, yRow + infoRowH, 0.5, COLOR_LINE_SOFT);
+      drawInfoPair(rX, yRow, halfW, infoRowH, row.leftLabel, row.leftValue);
+      drawInfoPair(rX + halfW, yRow, halfW, infoRowH, row.rightLabel, row.rightValue);
+    }
+  }
+
+  const totalIncl = asNumber(invoice?.total ?? 0);
+  const sumLabelW = 60;
+  drawLine(page, rX + sumLabelW, rY, rX + sumLabelW, rY + sumRowH, 0.8, COLOR_LINE_SOFT);
+  drawTextInCell(page, "합계금액", rX, rY, sumLabelW, sumRowH, {
+    font: fontReg,
+    size: 9,
+    align: "center",
+    color: COLOR_MUTED,
+    noEllipsis: true,
+  });
+  drawTextInCell(page, `${Math.round(totalIncl).toLocaleString("ko-KR")}원`, rX + sumLabelW, rY, rightW - sumLabelW, sumRowH, {
+    font: fontBold,
+    size: 10.5,
+    align: "left",
+    padX: 6,
+    noEllipsis: true,
+  });
+
+  // ===== Table 시작 =====
+  let y = topBoxY - gapAfterTop;
+
   const tableTopY = y;
   const rowH = 18;
   const headerH = 20;
@@ -1188,12 +1392,14 @@ async function renderGenericInvoicePDF(args: {
   }
 }
 
+// =========================
+// GET Handler
+// =========================
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
     const supabaseAdmin = getSupabaseAdmin();
     const { id } = await ctx.params;
 
-    // invoice + line items + meta
     const { data: invoice, error: invErr } = await supabaseAdmin
       .from("invoices")
       .select(
@@ -1224,7 +1430,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
     const invoiceMeta = (invoice as any).meta ?? {};
 
-    // office
     const { data: office, error: officeErr } = await supabaseAdmin
       .from("offices")
       .select("id, name")
@@ -1235,7 +1440,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       return NextResponse.json({ error: "Office not found", detail: officeErr?.message ?? null }, { status: 404 });
     }
 
-    // site
     const { data: site, error: siteErr } = await supabaseAdmin
       .from("sites")
       .select("id, name, address, office_phone")
@@ -1246,7 +1450,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       return NextResponse.json({ error: "Site not found", detail: siteErr?.message ?? null }, { status: 404 });
     }
 
-    // office profile(공급자 상세) - optional
     const { data: officeProfile, error: opErr } = await supabaseAdmin
       .from("office_profiles")
       .select("office_id, supplier_name, biz_no, ceo_name, address, biz_type, biz_item, phone, bank_name, bank_account, bank_holder, updated_at")
@@ -1257,7 +1460,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       return NextResponse.json({ error: "Failed to load office profile", detail: opErr.message }, { status: 500 });
     }
 
-    // company(청구대상 상세) - optional
     const companyId = String(invoiceMeta?.companyId ?? "").trim();
     let company: any = null;
 
@@ -1274,7 +1476,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       company = comp;
     }
 
-    // ---- PDF ----
     const pdfDoc = await PDFDocument.create();
     pdfDoc.registerFontkit(fontkit);
 
@@ -1290,7 +1491,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (invoiceMeta?.kind === "LABOR_INVOICE") {
       renderLaborInvoicePDF({ pdfDoc, fontReg, fontBold, fontStd, invoice, office, site, officeProfile, company });
     } else {
-      await renderGenericInvoicePDF({ pdfDoc, fontReg, fontBold, fontStd, invoice, office, site, supabaseAdmin });
+      await renderGenericInvoicePDF({ pdfDoc, fontReg, fontBold, fontStd, invoice, office, site, officeProfile, supabaseAdmin });
     }
 
     const pdfBytes = await pdfDoc.save();
@@ -1298,10 +1499,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     new Uint8Array(pdfArrayBuffer).set(pdfBytes);
 
     const invoiceNo = safeStr((invoice as any).invoice_number || (invoice as any).id);
-    const filename =
-      invoiceMeta?.kind === "LABOR_INVOICE"
-        ? `LABOR_INVOICE_${invoiceNo}.pdf`
-        : `invoice-${invoiceNo}.pdf`;
+    const filename = invoiceMeta?.kind === "LABOR_INVOICE" ? `LABOR_INVOICE_${invoiceNo}.pdf` : `invoice-${invoiceNo}.pdf`;
 
     return new NextResponse(pdfArrayBuffer, {
       status: 200,
@@ -1312,9 +1510,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       },
     });
   } catch (e: any) {
-    return NextResponse.json(
-      { error: "Failed to generate PDF", detail: safeStr(e?.message) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to generate PDF", detail: safeStr(e?.message) }, { status: 500 });
   }
 }

@@ -30,6 +30,71 @@ type CreateBody = {
   lineItems: LineItemIn[]
 }
 
+// -------------------------
+// Helpers
+// -------------------------
+function uniq<T>(arr: T[]) {
+  return Array.from(new Set(arr))
+}
+
+function asStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  return v
+    .map((x) => (typeof x === "string" ? x : x == null ? "" : String(x)))
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function extractLaborInvoiceSitesFromMeta(meta: any): { siteIds: string[]; siteNames: string[] } {
+  if (!meta || meta.kind !== "LABOR_INVOICE") return { siteIds: [], siteNames: [] }
+
+  // 1) meta.sites 우선
+  if (Array.isArray(meta.sites)) {
+    const siteIds = uniq(asStringArray(meta.sites.map((s: any) => s?.id)))
+    const siteNames = uniq(asStringArray(meta.sites.map((s: any) => s?.name)))
+    return { siteIds, siteNames }
+  }
+
+  // 2) meta.roleRows에서 unique 추출
+  if (Array.isArray(meta.roleRows)) {
+    const siteIds = uniq(asStringArray(meta.roleRows.map((r: any) => r?.siteId ?? r?.site_id)))
+    const siteNames = uniq(asStringArray(meta.roleRows.map((r: any) => r?.siteName ?? r?.site_name)))
+    return { siteIds, siteNames }
+  }
+
+  return { siteIds: [], siteNames: [] }
+}
+
+function buildSiteLabel(primarySiteName: string, siteNames: string[]) {
+  const names = siteNames.filter(Boolean)
+  if (names.length <= 1) return primarySiteName || names[0] || ""
+  const head = primarySiteName || names[0] || ""
+  return `${head} 외 ${names.length - 1}건`
+}
+
+function buildInvoiceSiteSummary(row: any) {
+  const primarySiteName = row?.sites?.name ?? ""
+  const meta = row?.meta ?? {}
+
+  if (meta?.kind !== "LABOR_INVOICE") {
+    return {
+      siteLabel: primarySiteName,
+      siteIds: row?.site_id ? [String(row.site_id)] : [],
+      siteNames: primarySiteName ? [String(primarySiteName)] : [],
+      siteCount: row?.site_id ? 1 : 0,
+    }
+  }
+
+  const { siteIds, siteNames } = extractLaborInvoiceSitesFromMeta(meta)
+  const siteCount = siteNames.length || siteIds.length || 0
+  const siteLabel = buildSiteLabel(
+    primarySiteName,
+    siteNames.length ? siteNames : [primarySiteName].filter(Boolean)
+  )
+
+  return { siteLabel, siteIds, siteNames, siteCount }
+}
+
 function computeTotals(lineItems: { amount: number }[]) {
   const subtotal = Math.max(0, Math.round(lineItems.reduce((s, x) => s + Number(x.amount ?? 0), 0)))
   const tax = Math.round(subtotal * 0.1)
@@ -77,6 +142,9 @@ function assertAttachmentScope(officeId: string, attachments?: Attachment[]) {
   }
 }
 
+// -------------------------
+// GET /api/invoices
+// -------------------------
 export async function GET(req: Request) {
   try {
     const cookieStore = await cookies()
@@ -86,22 +154,27 @@ export async function GET(req: Request) {
 
     const url = new URL(req.url)
     const status = url.searchParams.get("status") // 초안|발행|입금완료|pending|all
-    const siteId = url.searchParams.get("siteId")
+    const siteId = (url.searchParams.get("siteId") ?? "").trim()
     const search = (url.searchParams.get("search") ?? "").trim()
 
+    // NOTE:
+    // - siteId/search 를 DB에서만 처리하면 LABOR_INVOICE(통합)에서 누락될 수 있어
+    // - 그래서 DB에서는 status만 걸고,
+    // - siteId/search는 "대표현장/대표현장명 + meta(포함현장)"까지 서버 후처리로 보강한다.
     let q = supabaseAdmin
       .from("invoices")
-      .select("id, office_id, site_id, invoice_number, contractor_name, status, issue_date, due_date, subtotal, tax, total, notes, attachments, created_at, updated_at, sites(name)")
+      .select(
+        "id, office_id, site_id, invoice_number, contractor_name, status, issue_date, due_date, subtotal, tax, total, notes, attachments, meta, created_at, updated_at, sites(name)"
+      )
       .eq("office_id", session.officeId)
       .order("created_at", { ascending: false })
-
-    if (siteId) q = q.eq("site_id", siteId)
 
     if (status && status !== "all") {
       if (status === "pending") q = q.in("status", ["초안", "발행"])
       else q = q.eq("status", status)
     }
 
+    // DB 검색은 대표 필드로 1차만 (성능)
     if (search) {
       const s = search.replace(/%/g, "\\%").replace(/_/g, "\\_")
       q = q.or(`invoice_number.ilike.%${s}%,contractor_name.ilike.%${s}%,sites.name.ilike.%${s}%`)
@@ -110,11 +183,52 @@ export async function GET(req: Request) {
     const { data, error } = await q
     if (error) return jsonError(error.message, 500)
 
-    const invoices = (data ?? []).map((r: any) => ({
+    // meta 기반 site summary 포함
+    let rows = (data ?? []).map((r: any) => ({ ...r, ...buildInvoiceSiteSummary(r) }))
+
+    // 서버 후처리: siteId(포함현장까지)
+    if (siteId) {
+      rows = rows.filter((r: any) => {
+        if (String(r.site_id ?? "") === siteId) return true
+        const ids = asStringArray((r as any).siteIds)
+        return ids.includes(siteId)
+      })
+    }
+
+    // 서버 후처리: search(포함현장명까지)
+    if (search) {
+      const qLower = search.toLowerCase()
+      rows = rows.filter((r: any) => {
+        const invoiceNo = String(r.invoice_number ?? "").toLowerCase()
+        const contractor = String(r.contractor_name ?? "").toLowerCase()
+        const primarySite = String(r.sites?.name ?? "").toLowerCase()
+
+        const siteLabel = String((r as any).siteLabel ?? "").toLowerCase()
+        const siteNames = asStringArray((r as any).siteNames).map((x) => x.toLowerCase())
+
+        return (
+          invoiceNo.includes(qLower) ||
+          contractor.includes(qLower) ||
+          primarySite.includes(qLower) ||
+          siteLabel.includes(qLower) ||
+          siteNames.some((n) => n.includes(qLower))
+        )
+      })
+    }
+
+    const invoices = rows.map((r: any) => ({
       id: r.id,
       invoiceNumber: r.invoice_number,
+
       siteId: r.site_id,
       siteName: r.sites?.name ?? "",
+
+      // ✅ 추가: 통합 노무비(다현장) 표시/검색/필터를 위한 필드
+      siteLabel: r.siteLabel ?? (r.sites?.name ?? ""),
+      siteIds: asStringArray(r.siteIds),
+      siteNames: asStringArray(r.siteNames),
+      siteCount: Number(r.siteCount ?? 0),
+
       contractorName: r.contractor_name,
       status: r.status,
       issueDate: r.issue_date ?? "",
@@ -135,6 +249,9 @@ export async function GET(req: Request) {
   }
 }
 
+// -------------------------
+// POST /api/invoices (수기 생성)
+// -------------------------
 export async function POST(req: Request) {
   try {
     const cookieStore = await cookies()
@@ -154,7 +271,7 @@ export async function POST(req: Request) {
     const inItems = Array.isArray(body?.lineItems) ? body.lineItems : []
     if (inItems.length === 0) return jsonError("lineItems is required", 400)
 
-    // 1) ✅ siteId가 현재 office 소속인지 검증 (이거 빠지면 '상관없는 청구서' 바로 발생)
+    // 1) siteId가 현재 office 소속인지 검증
     const { data: site, error: siteErr } = await supabaseAdmin
       .from("sites")
       .select("id, office_id, name")
@@ -165,7 +282,7 @@ export async function POST(req: Request) {
     if (siteErr) return jsonError(siteErr.message, 500)
     if (!site) return jsonError("Invalid siteId or access denied", 403)
 
-    // 2) ✅ attachments 스코프 검증 (jsonb 배열)
+    // 2) attachments 스코프 검증
     const attachments = Array.isArray(body?.attachments) ? body.attachments : []
     try {
       assertAttachmentScope(session.officeId, attachments)
@@ -173,20 +290,16 @@ export async function POST(req: Request) {
       return jsonError(e?.message ?? "Invalid attachment scope", 400)
     }
 
-    // 3) ✅ lineItems 정규화 + amount 서버 재계산 (numeric/bigint 스키마에 맞춤)
+    // 3) lineItems 정규화 + amount 서버 재계산
     const normalized = inItems
       .map((li: any) => {
         const category = li?.category
         const description = String(li?.description ?? "").trim()
 
-        // quantity: numeric
         const quantity = Math.max(0, Number(li?.quantity ?? 0))
-
-        // unit_price/amount: bigint (정수로 강제)
         const unitPrice = Math.max(0, Math.round(Number(li?.unitPrice ?? 0)))
 
         if (!description) return null
-
         const amount = Math.round(quantity * unitPrice)
 
         return { category, description, quantity, unitPrice, amount }
@@ -201,17 +314,15 @@ export async function POST(req: Request) {
 
     if (normalized.length === 0) return jsonError("At least 1 line item is required", 400)
 
-    // 4) ✅ totals 계산(클라 amount 신뢰 X)
+    // 4) totals 계산
     const { subtotal, tax, total } = computeTotals(normalized)
 
-    // 5) ✅ invoiceNumber 생성(레이스 간이 대응: 중복시 재시도)
-    //    + invoices.office_id는 반드시 session.officeId
+    // 5) invoiceNumber 생성 (중복시 재시도)
     let lastErr: any = null
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const invoiceNumber = await nextInvoiceNumber(session.officeId)
 
-        // invoices insert
         const { data: invoiceRow, error: invErr } = await supabaseAdmin
           .from("invoices")
           .insert({
@@ -224,39 +335,46 @@ export async function POST(req: Request) {
             subtotal,
             tax,
             total,
-            attachments, // jsonb
+            attachments,
           })
-          .select("id, office_id, site_id, invoice_number, contractor_name, status, issue_date, due_date, subtotal, tax, total, notes, attachments, created_at, updated_at")
+          .select(
+            "id, office_id, site_id, invoice_number, contractor_name, status, issue_date, due_date, subtotal, tax, total, notes, attachments, created_at, updated_at"
+          )
           .single()
 
         if (invErr) throw invErr
 
-        // invoice_line_items insert
         const { error: liErr } = await supabaseAdmin.from("invoice_line_items").insert(
           normalized.map((li) => ({
             invoice_id: invoiceRow.id,
             category: li.category,
             description: li.description,
-            quantity: li.quantity,            // numeric
-            unit_price: li.unitPrice,         // bigint
-            amount: li.amount,                // bigint
+            quantity: li.quantity,
+            unit_price: li.unitPrice,
+            amount: li.amount,
           }))
         )
         if (liErr) throw liErr
 
-        // 응답: BillingPage가 기대하는 형태로 맞추기
         return NextResponse.json({
           invoice: {
             id: invoiceRow.id,
             invoiceNumber: invoiceRow.invoice_number,
             siteId: invoiceRow.site_id,
-            siteName: site?.name ?? "", // 있으면 넣어주면 프론트에서 좋아함
+            siteName: site?.name ?? "",
+
+            // 수기는 단일 현장이므로 라벨은 siteName 동일
+            siteLabel: site?.name ?? "",
+            siteIds: siteId ? [siteId] : [],
+            siteNames: site?.name ? [site.name] : [],
+            siteCount: 1,
+
             contractorName: invoiceRow.contractor_name,
             status: invoiceRow.status,
             issueDate: invoiceRow.issue_date ?? null,
             dueDate: invoiceRow.due_date ?? null,
             lineItems: normalized.map((li, idx) => ({
-              id: `tmp-${idx}`, // DB에서 line_items를 다시 select해서 내려주면 더 좋음
+              id: `tmp-${idx}`,
               category: li.category,
               description: li.description,
               quantity: li.quantity,
@@ -275,14 +393,12 @@ export async function POST(req: Request) {
       } catch (e: any) {
         lastErr = e
         const msg = String(e?.message ?? e)
-        // 유니크 인덱스 걸면 여기서 중복 뜨면 재시도 가능
         if (msg.toLowerCase().includes("duplicate") || msg.toLowerCase().includes("unique")) continue
         break
       }
     }
 
     return jsonError(lastErr?.message ?? "Failed to create invoice", 500)
-
   } catch (e: any) {
     return jsonError(e?.message ?? "Failed to create invoice", 500)
   }

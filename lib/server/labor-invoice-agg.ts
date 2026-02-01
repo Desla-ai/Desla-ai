@@ -2,6 +2,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 type LaborRoleRow = {
+  // ✅ 핵심: 행마다 실제 현장 정보 포함
+  siteId: string;
+  siteName: string;
+
   role: string; // roles.name 기반 라벨
   byDate: Record<string, number>; // YYYY-MM-DD -> units
   totalUnits: number;
@@ -13,6 +17,8 @@ export type LaborInvoiceAgg = {
   companyId: string;
   periodStart: string;
   periodEnd: string;
+
+  // 요청이 siteId로 들어온 경우에만 대표 현장 지정
   siteId: string | null;
   siteName: string | null;
 
@@ -60,7 +66,11 @@ export async function buildLaborInvoiceAgg(opts: {
   periodEnd: string;
 
   siteId?: string; // optional
-}) : Promise<{ agg: LaborInvoiceAgg; sites: Array<{ id: string; name: string; company_id?: string | null }>; companyName: string }> {
+}): Promise<{
+  agg: LaborInvoiceAgg;
+  sites: Array<{ id: string; name: string; company_id?: string | null }>;
+  companyName: string;
+}> {
   const { supabaseAdmin, officeId, companyId, periodStart, periodEnd } = opts;
   const siteId = safeStr(opts.siteId).trim();
 
@@ -102,6 +112,14 @@ export async function buildLaborInvoiceAgg(opts: {
   const siteIds = sites.map((x: any) => safeStr(x.id)).filter(Boolean);
   if (siteIds.length === 0) throw new Error("No sites linked");
 
+  // ✅ siteId -> siteName 매핑
+  const siteNameById = new Map<string, string>();
+  for (const s of sites) {
+    const sid = safeStr(s?.id);
+    if (!sid) continue;
+    siteNameById.set(sid, safeStr(s?.name));
+  }
+
   // 3) 기간 내 정산 로드 (work_date + worker_id + wage/units)
   const { data: dsRows, error: dsErr } = await supabaseAdmin
     .from("daily_settlements")
@@ -112,17 +130,12 @@ export async function buildLaborInvoiceAgg(opts: {
     .lte("work_date", periodEnd);
 
   if (dsErr) throw new Error(dsErr.message);
-
   if (!dsRows || dsRows.length === 0) throw new Error("No settlements in period");
 
   // workerId 모으기
-  const workerIds = Array.from(
-    new Set(dsRows.map((r: any) => safeStr(r.worker_id)).filter(Boolean))
-  );
+  const workerIds = Array.from(new Set(dsRows.map((r: any) => safeStr(r.worker_id)).filter(Boolean)));
 
   // 4) worker_roles -> roles(name) 로딩
-  // 주의: Supabase nested select는 배열로 올 수 있음.
-  // worker_roles는 (worker_id, role_id) 다대다라서 worker당 여러개가 나올 수 있음.
   const { data: wrRows, error: wrErr } = await supabaseAdmin
     .from("worker_roles")
     .select("worker_id, roles(name)")
@@ -137,9 +150,6 @@ export async function buildLaborInvoiceAgg(opts: {
     const wid = safeStr(row.worker_id);
     if (!wid) continue;
 
-    // roles(name)가:
-    // - 단일 object { name } 로 올 수도 있고
-    // - 배열 [{name}, ...] 로 올 수도 있음(설정/쿼리 형태에 따라)
     const rolesVal = row.roles;
 
     let names: string[] = [];
@@ -154,16 +164,16 @@ export async function buildLaborInvoiceAgg(opts: {
     roleNamesByWorker.set(wid, Array.from(new Set(prev.concat(names))));
   }
 
-  // role label 결정: 우선순위는 "첫 role" (여러 직종이면 첫 번째)
-  // 필요하면 향후: rules로 결정 / 복수 직종 표기 로직으로 확장
+  // role label 결정: 우선순위는 "첫 role"
   function roleLabelForWorker(workerId: string) {
     const names = roleNamesByWorker.get(workerId) ?? [];
     return names[0] ?? "미분류";
   }
 
-  // 5) 집계 (role x date)
+  // 5) 집계 (✅ site x role x date)
   const dates = buildDates(periodStart, periodEnd);
 
+  // ✅ key = `${siteId}::${role}`
   const roleMap = new Map<string, LaborRoleRow>();
   let grossTotal = 0;
   let unitsTotal = 0;
@@ -172,30 +182,44 @@ export async function buildLaborInvoiceAgg(opts: {
     const wid = safeStr(r.worker_id);
     const role = roleLabelForWorker(wid);
 
+    const sid = safeStr(r.site_id);
     const workDate = safeStr(r.work_date); // YYYY-MM-DD
     const units = roundHalf(asNumber(r.work_units, 0));
     const dailyWage = asNumber(r.daily_wage, 0);
 
-    if (!workDate || units <= 0) continue;
+    if (!sid || !workDate || units <= 0) continue;
 
     const gross = Math.round(dailyWage * units);
 
     grossTotal += gross;
     unitsTotal += units;
 
-    if (!roleMap.has(role)) {
-      roleMap.set(role, { role, byDate: {}, totalUnits: 0, gross: 0 });
+    const key = `${sid}::${role}`;
+    if (!roleMap.has(key)) {
+      roleMap.set(key, {
+        siteId: sid,
+        siteName: safeStr(siteNameById.get(sid) ?? ""),
+        role,
+        byDate: {},
+        totalUnits: 0,
+        gross: 0,
+      });
     }
-    const agg = roleMap.get(role)!;
-    agg.byDate[workDate] = roundHalf(asNumber(agg.byDate[workDate], 0) + units);
-    agg.totalUnits = roundHalf(agg.totalUnits + units);
-    agg.gross += gross;
+
+    const aggRow = roleMap.get(key)!;
+    aggRow.byDate[workDate] = roundHalf(asNumber(aggRow.byDate[workDate], 0) + units);
+    aggRow.totalUnits = roundHalf(aggRow.totalUnits + units);
+    aggRow.gross += gross;
   }
 
   if (grossTotal <= 0) throw new Error("No settlements in period");
 
-  const roleRows = Array.from(roleMap.values())
-    .sort((a, b) => b.gross - a.gross);
+  // ✅ 현장명 먼저, 그 다음 gross desc(한 현장 내에서 큰 금액부터)
+  const roleRows = Array.from(roleMap.values()).sort((a, b) => {
+    const s = safeStr(a.siteName).localeCompare(safeStr(b.siteName), "ko-KR");
+    if (s !== 0) return s;
+    return b.gross - a.gross;
+  });
 
   const agg: LaborInvoiceAgg = {
     kind: "LABOR_INVOICE",
@@ -210,5 +234,13 @@ export async function buildLaborInvoiceAgg(opts: {
     totalUnits: roundHalf(unitsTotal),
   };
 
-  return { agg, sites: sites.map((s: any) => ({ id: safeStr(s.id), name: safeStr(s.name), company_id: s.company_id ?? null })), companyName: safeStr(company.name) };
+  return {
+    agg,
+    sites: sites.map((s: any) => ({
+      id: safeStr(s.id),
+      name: safeStr(s.name),
+      company_id: s.company_id ?? null,
+    })),
+    companyName: safeStr(company.name),
+  };
 }
